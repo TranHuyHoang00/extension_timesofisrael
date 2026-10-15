@@ -2,7 +2,7 @@
 <html lang="vi">
   <head>
     <meta charset="utf-8" />
-    <title>TimeOfIsrael Crawler</title>
+    <title>Crawler</title>
     <link rel="stylesheet" href="sidepanel.css" />
   </head>
   <body>
@@ -55,13 +55,13 @@
         </label>
         <label
           >Load more tối đa
-          <input id="maxPages" type="number" min="0" max="100" step="1" />
+          <input id="maxPages" type="number" min="0" max="10" step="1" />
         </label>
       </div>
 
       <div class="row">
         <label
-          >HTML lưu lại
+          >HTML gửi đi
           <select id="htmlMode">
             <option value="article">Chỉ khối bài viết (#main-content)</option>
             <option value="full">Toàn bộ trang</option>
@@ -73,6 +73,40 @@
         </label>
       </div>
 
+      <fieldset>
+        <legend>Kafka</legend>
+        <label
+          >Gateway URL <span class="muted">(dùng chung mọi tab)</span>
+          <input id="gatewayUrl" type="url" spellcheck="false" />
+        </label>
+        <label
+          >API key <span class="muted">(dùng chung mọi tab)</span>
+          <span class="pair">
+            <input
+              id="apiKey"
+              type="password"
+              spellcheck="false"
+              autocomplete="off"
+            />
+            <button type="button" id="btnShowKey" class="small">Hiện</button>
+          </span>
+        </label>
+        <div class="row">
+          <label
+            >Topic <span class="muted">(riêng tab này)</span>
+            <input id="topic" type="text" spellcheck="false" />
+          </label>
+          <label
+            >Batch size
+            <input id="batchSize" type="number" min="1" max="100" step="1" />
+          </label>
+        </div>
+        <small class="hint"
+          >Gửi khi đủ batch size hoặc dữ liệu đạt khoảng 4 MB. Hết lượt chạy thì
+          gửi nốt phần còn lại.</small
+        >
+      </fieldset>
+
       <div id="errors" class="errors" hidden></div>
 
       <div class="actions">
@@ -81,7 +115,10 @@
         </button>
         <button type="button" id="btnStop">Tắt lịch</button>
         <button type="button" id="btnRun">Chạy ngay</button>
-        <button type="button" id="btnTest">Test</button>
+        <button type="button" id="btnTest">Test crawl</button>
+        <button type="button" id="btnTestGw" class="wide">
+          Test gateway <span class="muted">(gửi 1 message test vào topic)</span>
+        </button>
       </div>
     </form>
 
@@ -91,8 +128,13 @@
         <dd id="nextRun">—</dd>
         <dt>Lần chạy trước</dt>
         <dd id="lastRun">—</dd>
-        <dt>Đã lưu (tab này)</dt>
-        <dd id="totalSaved">0</dd>
+        <dt>Đã gửi (tab này)</dt>
+        <dd id="totalSent">0</dd>
+        <dt>Chờ gửi</dt>
+        <dd>
+          <span id="pendingCount">0</span> bài
+          <button type="button" id="btnFlush" class="link">gửi ngay</button>
+        </dd>
         <dt>Cache</dt>
         <dd>
           <span id="seenCount">0</span> link<span

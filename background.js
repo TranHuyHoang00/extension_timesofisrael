@@ -1,22 +1,32 @@
 import { parseCron, nextRun } from './lib/cron.js';
-import { normalizeConfig, DEFAULTS } from './lib/config.js';
-import * as cache from './lib/cache.js';
+import { normalizeConfig, normalizeGlobal, gatewayOriginPattern, DEFAULTS, GLOBAL_DEFAULTS } from './lib/config.js';
+import * as store from './lib/cache.js';
 
-// ---------- Khoá lưu trữ (cấu hình/trạng thái/log gắn theo tab id; cache ở IndexedDB, gắn theo host) ----------
+// ---------- Hằng số ----------
+// chrome.storage.local: cấu hình/trạng thái/log gắn theo tab id, cấu hình gateway dùng chung.
+// IndexedDB (lib/cache.js): cache đã gửi, hàng chờ gửi, giữ chỗ.
 const K = {
   cfg: id => `cfg:${id}`,
   st: id => `st:${id}`,
   log: id => `log:${id}`,
+  global: 'global',
 };
 const ALARM_PREFIX = 'crawl:';
 const DAY_MS = 24 * 3600 * 1000;
-const STALE_MS = 30 * 60 * 1000;    // cờ "đang chạy" quá 30 phút coi như treo
+const STALE_MS = 30 * 60 * 1000;           // cờ "đang chạy" quá 30 phút coi như treo
+const CLAIM_TTL_MS = 10 * 60 * 1000;       // giữ chỗ một bài tối đa 10 phút
+const MAX_BATCH_BYTES = 4 * 1024 * 1024;   // dữ liệu một batch ~4 MB (body request ~5 MB sau khi mã hoá chuỗi)
+const OUTBOX_MAX = 300;                    // hàng chờ tối đa 300 bài, đầy thì dừng crawl
+const OUTBOX_TTL_MS = 7 * DAY_MS;          // bài chờ gửi quá 7 ngày thì bỏ
+const RETRY_DELAYS = [2000, 5000];         // thử lại 2 lần sau lần đầu → tổng 3 lần
+
 const hostOf = cfg => new URL(cfg?.home || DEFAULTS.home).host;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const get = async (key, def) => (await chrome.storage.local.get(key))[key] ?? def;
 const set = (key, val) => chrome.storage.local.set({ [key]: val });
 
-// Ghi storage tuần tự để các lần ghi log/status/cache không đè nhau
+// Ghi storage tuần tự để các lần ghi log/status không đè nhau
 let chain = Promise.resolve();
 const serial = fn => {
   const p = chain.then(fn, fn);
@@ -25,13 +35,13 @@ const serial = fn => {
 };
 
 const patchStatus = (tabId, patch) => serial(async () => {
-  const st = { ...(await get(K.st(tabId), {})), ...patch };
+  const st = { ...(await get(K.st(tabId), {})), ...(typeof patch === 'function' ? patch(await get(K.st(tabId), {})) : patch) };
   await set(K.st(tabId), st);
   return st;
 });
 
 const timeStr = () => new Date().toLocaleTimeString('vi-VN', { hour12: false });
-const log = (tabId, text) => serial(async () => {
+const log = (tabId, text) => tabId == null ? Promise.resolve() : serial(async () => {
   const arr = await get(K.log(tabId), []);
   arr.push(`${timeStr()}  ${text}`);
   await set(K.log(tabId), arr.slice(-150));
@@ -44,7 +54,7 @@ async function migrateOldCache() {
     const m = key.match(/^seen:(.+)$/);
     if (!m || !Array.isArray(urls)) continue;
     const now = Date.now();
-    await cache.addMany(urls.map(url => ({ url, host: m[1], post_id: null, savedAt: now })));
+    await store.addMany(urls.map(url => ({ url, host: m[1], post_id: null, savedAt: now })));
     await chrome.storage.local.remove(key);
   }
 }
@@ -101,7 +111,7 @@ async function ensureOnSite(tabId, home) {
   if (have !== want) {
     await log(tabId, `Tab không ở ${want}, chuyển về link home`);
     await chrome.tabs.update(tabId, { url: home });
-    await new Promise(r => setTimeout(r, 300));
+    await sleep(300);
   }
   await waitComplete(tabId);
 }
@@ -118,7 +128,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, info) => {
   const st = await get(K.st(tabId));
   if (st?.running) {
     await patchStatus(tabId, { running: false, lastError: 'Tab tải lại hoặc chuyển trang giữa lượt chạy' });
-    await log(tabId, 'Lượt chạy bị ngắt vì tab tải lại / chuyển trang');
+    await log(tabId, 'Lượt chạy bị ngắt vì tab tải lại / chuyển trang (bài đã crawl vẫn nằm trong hàng chờ gửi)');
   }
 });
 
@@ -130,10 +140,10 @@ async function sweepOrphans() {
     if (m && !(await tabExists(Number(m[1])))) await cleanup(Number(m[1]));
   }
 }
+
 // ---------- Side panel: mỗi tab một panel riêng ----------
 // manifest có side_panel.default_path → Chrome hiện mục "Open side panel" khi chuột phải vào icon.
-// Mỗi tab được gán thêm panel riêng (sidepanel.html?tabId=…), nên dù mở bằng icon hay bằng menu,
-// panel hiện ra là của đúng tab đó và giữ form/test/log riêng khi chuyển qua lại giữa các tab.
+// Mỗi tab được gán panel riêng (sidepanel.html?tabId=…), mở bằng icon hay bằng menu đều ra panel của đúng tab đó.
 const panelPath = tabId => `sidepanel.html?tabId=${tabId}`;
 
 async function setTabPanel(tabId) {
@@ -157,23 +167,134 @@ chrome.tabs.onActivated.addListener(({ tabId }) => { setTabPanel(tabId); });
 chrome.runtime.onStartup.addListener(() => { sweepOrphans(); setAllTabPanels(); });
 chrome.runtime.onInstalled.addListener(() => { sweepOrphans(); setAllTabPanels(); migrateOldCache(); });
 
+// ---------- Gateway Kafka ----------
+async function getGlobal() {
+  return { ...GLOBAL_DEFAULTS, ...(await get(K.global, {})) };
+}
+
+async function checkGateway(g = null) {
+  g = g || await getGlobal();
+  const { errors } = normalizeGlobal(g);
+  if (errors.length) throw new Error(`Cấu hình gateway chưa đủ: ${errors.join('; ')}`);
+  const pattern = gatewayOriginPattern(g.gatewayUrl);
+  if (!(await chrome.permissions.contains({ origins: [pattern] }))) {
+    throw new Error(`Chưa cấp quyền truy cập ${pattern} — bấm "Lưu & bật lịch" để Chrome hỏi cấp quyền`);
+  }
+  return g;
+}
+
+// Gửi một batch. message là mảng bài đã JSON.stringify (đúng định dạng gateway yêu cầu).
+// Thử tối đa 3 lần với lỗi mạng / 5xx / 408 / 429. Lỗi 4xx khác (sai key, sai topic…) không thử lại.
+async function sendBatch(topic, records, g = null) {
+  g = await checkGateway(g);
+  const url = new URL(g.gatewayUrl);
+  url.searchParams.set('apikey', g.apiKey);
+  const body = JSON.stringify({ topic, message: JSON.stringify(records) });
+
+  let lastError = '';
+  for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
+    if (attempt > 0) await sleep(RETRY_DELAYS[attempt - 1]);
+    try {
+      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+      const text = (await res.text()).slice(0, 300);
+      if (res.ok) return { ok: true, status: res.status, text, bytes: body.length };
+      lastError = `HTTP ${res.status}${text ? `: ${text}` : ''}`;
+      const retryable = res.status >= 500 || res.status === 408 || res.status === 429;
+      if (!retryable) break;
+    } catch (e) {
+      lastError = `Lỗi mạng: ${e.message}`;
+    }
+  }
+  return { ok: false, error: lastError };
+}
+
+// Chỉ một lần gửi tại một thời điểm, để không gửi trùng cùng một bài
+let flushChain = Promise.resolve();
+const withFlushLock = fn => {
+  const p = flushChain.then(fn, fn);
+  flushChain = p.catch(() => {});
+  return p;
+};
+
+// Gửi hàng chờ của một topic.
+//   all = false: chỉ gửi khi đủ batch (theo số bài hoặc dung lượng)
+//   all = true : gửi hết, kể cả batch cuối chưa đủ
+// Trả về { sent, ok, error }
+function flushTopic(topic, { all = false, tabId = null, batchSize = null } = {}) {
+  return withFlushLock(async () => {
+    let sent = 0;
+    while (true) {
+      const first = await store.peekBatch(topic, 1, Infinity);
+      if (!first.items.length) return { sent, ok: true };
+      const size = batchSize || first.items[0].batchSize || DEFAULTS.batchSize;
+      const batch = await store.peekBatch(topic, size, MAX_BATCH_BYTES);
+      if (!batch.full && !all) return { sent, ok: true };
+
+      const records = batch.items.map(it => it.record);
+      const r = await sendBatch(topic, records);
+      if (!r.ok) {
+        await store.markFailed(batch.items, r.error);
+        await log(tabId, `Gửi batch ${batch.items.length} bài lên topic "${topic}" thất bại: ${r.error}`);
+        return { sent, ok: false, error: r.error };
+      }
+      await store.commitSent(batch.items);
+      sent += batch.items.length;
+      await log(tabId, `Đã gửi ${batch.items.length} bài (${(r.bytes / 1024).toFixed(0)} KB) lên topic "${topic}"`);
+      // Cộng số đã gửi cho đúng tab đã crawl bài đó (hai tab cùng topic dùng chung hàng chờ)
+      const perTab = new Map();
+      for (const it of batch.items) if (it.tabId != null) perTab.set(it.tabId, (perTab.get(it.tabId) || 0) + 1);
+      for (const [id, n] of perTab) {
+        if (!(await tabExists(id))) continue;
+        await patchStatus(id, st => ({ runSent: (st.runSent || 0) + n, totalSent: (st.totalSent || 0) + n }));
+      }
+    }
+  });
+}
+
+async function flushAll({ tabId = null } = {}) {
+  let sent = 0;
+  for (const topic of await store.outboxTopics()) {
+    const r = await flushTopic(topic, { all: true, tabId });
+    sent += r.sent;
+    if (!r.ok) return { sent, ok: false, error: r.error };
+  }
+  return { sent, ok: true };
+}
+
 // ---------- Chạy ----------
+async function housekeeping(tabId, cfg) {
+  const days = cfg.cacheDays || DEFAULTS.cacheDays;
+  const purged = await store.purgeOlderThan(hostOf(cfg), Date.now() - days * DAY_MS);
+  if (purged) await log(tabId, `Dọn ${purged} link quá ${days} ngày khỏi cache`);
+  await store.purgeClaims();
+  const dropped = await store.purgeOutbox(Date.now() - OUTBOX_TTL_MS);
+  if (dropped) await log(tabId, `Bỏ ${dropped} bài chờ gửi quá 7 ngày`);
+}
+
 async function startRun(tabId, reason) {
   const cfg = await get(K.cfg(tabId));
-  if (!cfg) throw new Error('Tab này chưa lưu cấu hình');
+  if (!cfg) return { ok: false, error: 'Tab này chưa lưu cấu hình' };
   const st = await get(K.st(tabId), {});
   if (st.running && Date.now() - (st.runningSince || 0) < STALE_MS) {
     await log(tabId, `Bỏ qua (${reason}): lượt trước chưa xong`);
     return { ok: false, error: 'Lượt trước chưa xong' };
   }
   try {
-    const days = cfg.cacheDays || DEFAULTS.cacheDays;
-    const purged = await cache.purgeOlderThan(hostOf(cfg), Date.now() - days * DAY_MS);
-    if (purged) await log(tabId, `Dọn ${purged} link quá ${days} ngày khỏi cache`);
+    await checkGateway();
+    await housekeeping(tabId, cfg);
+
+    // Gửi nốt hàng chờ còn lại từ các lượt trước; gateway lỗi thì không crawl thêm
+    const pending = await store.outboxCount();
+    if (pending) {
+      await log(tabId, `Còn ${pending} bài chờ gửi từ lượt trước, gửi trước khi crawl`);
+      const r = await flushAll({ tabId });
+      if (!r.ok) throw new Error(`Gateway lỗi, chưa crawl: ${r.error}`);
+    }
+
     await ensureOnSite(tabId, cfg.home);
     await inject(tabId);
     const runId = `${tabId}-${Date.now()}`;
-    await patchStatus(tabId, { running: true, runningSince: Date.now(), runId, runSaved: 0, lastError: null });
+    await patchStatus(tabId, { running: true, runningSince: Date.now(), runId, runSent: 0, lastError: null });
     await log(tabId, `Bắt đầu chạy (${reason})`);
     await chrome.tabs.sendMessage(tabId, { type: 'TOI_RUN', runId, config: cfg });
     return { ok: true };
@@ -182,43 +303,6 @@ async function startRun(tabId, reason) {
     await log(tabId, `Không chạy được: ${e.message}`);
     return { ok: false, error: e.message };
   }
-}
-
-// ---------- Nơi nhận dữ liệu: hiện lưu file, sau này đổi sang Kafka ----------
-async function sinkRecord(record) {
-  return saveToFile(record);
-  // Khi chuyển sang Kafka: thay bằng POST tới Kafka REST proxy / API trung gian, ví dụ
-  // await fetch(KAFKA_PROXY_URL, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(record) });
-}
-
-let creatingOffscreen = null;
-async function ensureOffscreen() {
-  const ctx = await chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] });
-  if (ctx.length) return;
-  if (!creatingOffscreen) {
-    creatingOffscreen = chrome.offscreen.createDocument({
-      url: 'offscreen.html',
-      reasons: ['BLOBS'],
-      justification: 'Tạo blob URL để lưu file JSON bài viết',
-    }).finally(() => { creatingOffscreen = null; });
-  }
-  await creatingOffscreen;
-}
-
-const pad = n => String(n).padStart(2, '0');
-function localDate(d = new Date()) {
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-
-async function saveToFile(record) {
-  await ensureOffscreen();
-  const json = JSON.stringify(record, null, 2);
-  const r = await chrome.runtime.sendMessage({ target: 'offscreen', type: 'BLOB_URL', text: json });
-  if (!r?.url) throw new Error('Không tạo được blob URL');
-  const slug = new URL(record.url).pathname.replace(/^\/|\/$/g, '').replace(/[^a-z0-9-]/gi, '_').slice(0, 80);
-  const filename = `toi_crawl/${localDate()}/${record.post_id || 'no-id'}_${slug}.json`;
-  await chrome.downloads.download({ url: r.url, filename, conflictAction: 'overwrite', saveAs: false });
-  return filename;
 }
 
 // ---------- Tin nhắn ----------
@@ -231,34 +315,66 @@ async function handle(msg, sender) {
       await log(tabIdFromSender, msg.text);
       return { ok: true };
 
-    // Content script hỏi: trong các link này, link nào đã có trong cache?
+    // Link nào không cần crawl (đã gửi / đang chờ gửi / lượt khác đang giữ chỗ)
     case 'CACHE_FILTER':
-      return { ok: true, seen: await cache.filterSeen(msg.urls || []) };
+      return { ok: true, seen: await store.known(msg.urls || [], msg.owner || null) };
+
+    case 'CLAIM':
+      return { ok: true, granted: await store.claim(msg.url, msg.owner, CLAIM_TTL_MS) };
+
+    case 'RELEASE':
+      await store.release(msg.url, msg.owner);
+      return { ok: true };
 
     case 'TOI_RECORD': {
       const tabId = tabIdFromSender;
       const st = await get(K.st(tabId), {});
       if (st.runId !== msg.runId) return { ok: false, error: 'Lượt chạy đã hết hiệu lực' };
-      const file = await sinkRecord(msg.record);
-      await cache.addSeen({ url: msg.record.url, host: new URL(msg.record.url).host, post_id: msg.record.post_id });
-      await patchStatus(tabId, {
-        runSaved: (st.runSaved || 0) + 1,
-        totalSaved: (st.totalSaved || 0) + 1,
+      const cfg = await get(K.cfg(tabId));
+      const rec = msg.record;
+      const host = new URL(rec.url).host;
+
+      // Cùng post_id nhưng khác URL (đổi slug, chuyển hướng) → không gửi lại, chỉ ghi nhận URL mới
+      if (await store.postIdKnown(rec.post_id, rec.url)) {
+        await store.addSeen({ url: rec.url, host, post_id: rec.post_id });
+        await store.release(rec.url, msg.runId);
+        await log(tabId, `Bỏ qua (trùng post_id ${rec.post_id}): ${rec.url}`);
+        return { ok: true, dup: true };
+      }
+
+      if ((await store.outboxCount()) >= OUTBOX_MAX) {
+        await store.release(rec.url, msg.runId);
+        return { ok: false, fatal: true, error: `Hàng chờ gửi đã đầy (${OUTBOX_MAX} bài) — kiểm tra gateway` };
+      }
+
+      const bytes = JSON.stringify(rec).length;
+      await store.enqueue({
+        url: rec.url, host, post_id: rec.post_id ?? null, tabId,
+        topic: cfg.topic, batchSize: cfg.batchSize,
+        record: rec, bytes, createdAt: Date.now(),
       });
-      await log(tabId, `Đã lưu ${file}`);
-      return { ok: true, file };
+
+      const r = await flushTopic(cfg.topic, { tabId, batchSize: cfg.batchSize });
+      if (!r.ok) return { ok: true, queued: true, gatewayError: r.error };
+      return { ok: true, queued: true };
     }
 
     case 'TOI_DONE': {
       const tabId = tabIdFromSender;
+      const cfg = await get(K.cfg(tabId));
       const s = msg.stats || {};
-      await patchStatus(tabId, {
-        running: false,
-        lastRunAt: Date.now(),
-        lastRunSummary: `${s.found ?? 0} link mới, lưu ${s.saved ?? 0}, lỗi ${s.errors ?? 0}`,
-        lastError: msg.error || null,
-      });
-      await log(tabId, `Kết thúc: ${s.found ?? 0} link mới, lưu ${s.saved ?? 0}, lỗi ${s.errors ?? 0}${msg.error ? ` — ${msg.error}` : ''}`);
+      let error = msg.error || null;
+      // Gửi nốt batch cuối chưa đủ số lượng (bỏ qua nếu lượt này dừng vì gateway lỗi)
+      if (cfg?.topic && !msg.gatewayDown) {
+        const r = await flushTopic(cfg.topic, { all: true, tabId, batchSize: cfg.batchSize });
+        if (!r.ok && !error) error = `Gửi batch cuối thất bại: ${r.error}`;
+      }
+      const pending = await store.outboxCount(cfg?.topic);
+      const st = await get(K.st(tabId), {});
+      const summary = `${s.found ?? 0} link mới, crawl ${s.queued ?? 0}, đã gửi ${st.runSent || 0}`
+        + `${s.dup ? `, trùng ${s.dup}` : ''}${s.errors ? `, lỗi ${s.errors}` : ''}${pending ? `, còn chờ gửi ${pending}` : ''}`;
+      await patchStatus(tabId, { running: false, lastRunAt: Date.now(), lastRunSummary: summary, lastError: error });
+      await log(tabId, `Kết thúc: ${summary}${error ? ` — ${error}` : ''}`);
       return { ok: true };
     }
 
@@ -268,19 +384,23 @@ async function handle(msg, sender) {
       const cfg = await get(K.cfg(tabId));
       const status = await get(K.st(tabId), {});
       const logs = await get(K.log(tabId), []);
-      const seenCount = await cache.countSeen(hostOf(cfg));
-      return { ok: true, cfg, status, logs, seenCount };
+      const seenCount = await store.countSeen(hostOf(cfg));
+      const pendingCount = await store.outboxCount();
+      return { ok: true, cfg, global: await getGlobal(), status, logs, seenCount, pendingCount };
     }
 
     case 'SAVE': {
-      const { tabId, raw, enable } = msg;
-      const { cfg, errors } = normalizeConfig(raw);
+      const { tabId, raw, rawGlobal, enable } = msg;
+      const a = normalizeConfig(raw, { requireKafka: true });
+      const b = normalizeGlobal(rawGlobal);
+      const errors = [...a.errors, ...b.errors];
       if (errors.length) return { ok: false, errors };
-      await set(K.cfg(tabId), cfg);
+      await set(K.global, b.global);
+      await set(K.cfg(tabId), a.cfg);
       await patchStatus(tabId, { enabled: !!enable });
       await schedule(tabId);
-      await log(tabId, enable ? `Đã lưu và bật lịch "${cfg.cron}"` : 'Đã lưu cấu hình (lịch đang tắt)');
-      if (enable) ensureOnSite(tabId, cfg.home).catch(() => {});
+      await log(tabId, enable ? `Đã lưu và bật lịch "${a.cfg.cron}", topic "${a.cfg.topic}"` : 'Đã lưu cấu hình (lịch đang tắt)');
+      if (enable) ensureOnSite(tabId, a.cfg.home).catch(() => {});
       return { ok: true };
     }
 
@@ -298,17 +418,37 @@ async function handle(msg, sender) {
 
     case 'TEST': {
       const { tabId, raw } = msg;
-      const { cfg, errors } = normalizeConfig(raw);
+      const { cfg, errors } = normalizeConfig(raw, { requireKafka: false });
       if (errors.length) return { ok: false, errors };
       await ensureOnSite(tabId, cfg.home);
       await inject(tabId);
-      await log(tabId, 'Chạy test (không lưu file, không ghi cache)');
+      await log(tabId, 'Chạy test crawl (không gửi Kafka, không ghi cache)');
       return chrome.tabs.sendMessage(tabId, { type: 'TOI_TEST', config: cfg });
+    }
+
+    // Gửi thử 1 message nhỏ để kiểm tra URL, API key, topic
+    case 'TEST_GATEWAY': {
+      const { tabId, rawGlobal, topic } = msg;
+      const b = normalizeGlobal(rawGlobal);
+      const t = normalizeConfig({ ...DEFAULTS, topic }, { requireKafka: true });
+      const errors = [...b.errors, ...t.errors.filter(e => /topic/i.test(e))];
+      if (errors.length) return { ok: false, errors };
+      const r = await sendBatch(t.cfg.topic, [{ type: 'test', source: 'toi-crawler', ts: Date.now() }], b.global)
+        .catch(e => ({ ok: false, error: e.message }));
+      await log(tabId, r.ok
+        ? `Test gateway OK (HTTP ${r.status})${r.text ? `: ${r.text}` : ''}`
+        : `Test gateway lỗi: ${r.error}`);
+      return r;
+    }
+
+    case 'FLUSH_NOW': {
+      const r = await flushAll({ tabId: msg.tabId }).catch(e => ({ ok: false, error: e.message }));
+      return r;
     }
 
     case 'CLEAR_CACHE': {
       const host = hostOf(await get(K.cfg(msg.tabId)));
-      const n = await cache.clearHost(host);
+      const n = await store.clearHost(host);
       await log(msg.tabId, `Đã xoá ${n} link khỏi cache của ${host}`);
       return { ok: true };
     }
@@ -317,7 +457,6 @@ async function handle(msg, sender) {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg?.target === 'offscreen') return false;
   handle(msg, sender).then(
     r => sendResponse(r),
     e => sendResponse({ ok: false, error: e?.message || String(e) }),

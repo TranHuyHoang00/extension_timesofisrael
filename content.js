@@ -16,7 +16,9 @@
   const log = text => chrome.runtime.sendMessage({ type: 'TOI_LOG', text }).catch(() => {});
 
   class Aborted extends Error {}
+  class Fatal extends Error {}     // lỗi khiến cả lượt chạy phải dừng (gateway lỗi, hàng chờ đầy)
   const checkAbort = () => { if (abortFlag) throw new Aborted('Đã dừng'); };
+  const send = msg => chrome.runtime.sendMessage(msg);
 
   async function fetchDoc(url) {
     const res = await fetch(url, { credentials: 'include' });
@@ -25,10 +27,10 @@
     return { html, finalUrl: res.url, doc: new DOMParser().parseFromString(html, 'text/html') };
   }
 
-  // Hỏi background: trong các link này, link nào đã có trong cache (IndexedDB nằm ở background)
-  async function cachedOf(urls) {
+  // Hỏi background: link nào không cần crawl (đã gửi Kafka, đang chờ gửi, hoặc lượt chạy khác đang giữ chỗ)
+  async function cachedOf(urls, owner = null) {
     if (!urls.length) return new Set();
-    const r = await chrome.runtime.sendMessage({ type: 'CACHE_FILTER', urls });
+    const r = await send({ type: 'CACHE_FILTER', urls, owner });
     if (!r?.ok) throw new Error(r?.error || 'Không đọc được cache');
     return new Set(r.seen);
   }
@@ -36,7 +38,7 @@
   // Trang cate (hoặc home) + các lượt Load more → danh sách link bài mới
   //   skip: link đã xử lý trong lượt chạy này (bài nằm ở nhiều cate chỉ lấy một lần)
   //   useCache: false khi test, để thấy hết link
-  async function collectFromListing(startUrl, cfg, re, { skip = new Set(), useCache = true, maxPages }) {
+  async function collectFromListing(startUrl, cfg, re, { skip = new Set(), useCache = true, maxPages, owner = null }) {
     const origin = new URL(startUrl).origin;
     const found = [];
     const foundSet = new Set();
@@ -49,7 +51,7 @@
     for (let page = 0; ; page++) {
       checkAbort();
       const links = T.extractLinks(doc, startUrl, re);
-      const cached = useCache ? await cachedOf(links) : new Set();
+      const cached = useCache ? await cachedOf(links, owner) : new Set();
       const fresh = links.filter(u => !cached.has(u) && !skip.has(u) && !foundSet.has(u));
       fresh.forEach(u => { foundSet.add(u); found.push(u); });
       log(`${page === 0 ? 'Trang cate' : `Load more #${page}`}: ${links.length} link bài, ${fresh.length} mới`);
@@ -67,10 +69,41 @@
     return found;
   }
 
-  // Lượt chạy thật: lần lượt từng cate → từng bài → gửi record về background để lưu
+  // Xử lý một bài: giữ chỗ → tải → bóc → đưa vào hàng chờ gửi Kafka (background gửi khi đủ batch)
+  async function processArticle(url, src, cfg, runId, stats) {
+    const c = await send({ type: 'CLAIM', url, owner: runId });
+    if (!c?.granted) {
+      stats.skipped++;
+      log(`Bỏ qua (đã gửi / đang chờ gửi / tab khác đang xử lý): ${url}`);
+      return;
+    }
+    await randomDelay(cfg);
+    let r;
+    try {
+      const { html, doc, finalUrl } = await fetchDoc(url);
+      const record = T.buildRecord({ url, finalUrl, html, doc, source: src, htmlMode: cfg.htmlMode });
+      record.ts = Date.now();
+      r = await send({ type: 'TOI_RECORD', runId, record });
+    } catch (e) {
+      await send({ type: 'RELEASE', url, owner: runId }).catch(() => {});
+      throw e;
+    }
+    if (!r?.ok) {
+      if (r?.fatal) throw new Fatal(r.error);
+      throw new Error(r?.error || 'Background không nhận bài');
+    }
+    if (r.dup) { stats.dup++; return; }
+    stats.queued++;
+    if (r.gatewayError) {
+      throw new Fatal(`Gateway lỗi: ${r.gatewayError}. Dừng lượt chạy, bài đã crawl nằm trong hàng chờ và sẽ gửi lại lượt sau`);
+    }
+  }
+
+  // Lượt chạy thật: lần lượt từng cate → từng bài
   async function run({ runId, config: cfg }) {
-    const stats = { found: 0, saved: 0, errors: 0 };
+    const stats = { found: 0, queued: 0, dup: 0, skipped: 0, errors: 0 };
     let error = null;
+    let gatewayDown = false;
     try {
       const re = new RegExp(cfg.regex);
       const done = new Set();
@@ -81,7 +114,7 @@
         log(`Mở ${src}`);
         let links;
         try {
-          links = await collectFromListing(src, cfg, re, { skip: done, maxPages: cfg.maxPages });
+          links = await collectFromListing(src, cfg, re, { skip: done, maxPages: cfg.maxPages, owner: runId });
         } catch (e) {
           if (e instanceof Aborted) throw e;
           stats.errors++;
@@ -92,15 +125,11 @@
 
         for (const url of links) {
           checkAbort();
-          done.add(url);   // đánh dấu đã xử lý trong lượt này (lỗi thì lượt sau thử lại vì chưa vào cache)
-          await randomDelay(cfg);
+          done.add(url);   // bài nằm ở nhiều cate chỉ xử lý một lần trong lượt này
           try {
-            const { html, doc, finalUrl } = await fetchDoc(url);
-            const record = T.buildRecord({ url, finalUrl, html, doc, source: src, htmlMode: cfg.htmlMode });
-            const r = await chrome.runtime.sendMessage({ type: 'TOI_RECORD', runId, record });
-            if (!r?.ok) throw new Error(r?.error || 'Background không lưu được');
-            stats.saved++;
+            await processArticle(url, src, cfg, runId, stats);
           } catch (e) {
+            if (e instanceof Fatal) throw e;
             stats.errors++;
             log(`Lỗi bài ${url}: ${e.message}`);
           }
@@ -108,11 +137,12 @@
       }
     } catch (e) {
       error = e instanceof Aborted ? 'Đã dừng theo yêu cầu' : e.message;
+      gatewayDown = e instanceof Fatal;
     }
-    await chrome.runtime.sendMessage({ type: 'TOI_DONE', runId, stats, error }).catch(() => {});
+    await send({ type: 'TOI_DONE', runId, stats, error, gatewayDown }).catch(() => {});
   }
 
-  // Test: không lưu file, không ghi cache. Lấy link của nguồn đầu tiên + bóc thử 1 bài.
+  // Test: không gửi Kafka, không ghi cache. Lấy link của nguồn đầu tiên + bóc thử 1 bài.
   async function test(cfg) {
     const re = new RegExp(cfg.regex);
     const src = cfg.cates[0] || cfg.home;
@@ -128,6 +158,7 @@
       await randomDelay(cfg);
       const { html, doc, finalUrl } = await fetchDoc(links[0]);
       const rec = T.buildRecord({ url: links[0], finalUrl, html, doc, source: src, htmlMode: cfg.htmlMode });
+      rec.ts = Date.now();
       result.sample = {
         ...rec,
         content_text: rec.content_text ? rec.content_text.slice(0, 400) + (rec.content_text.length > 400 ? '…' : '') : null,

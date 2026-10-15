@@ -1,5 +1,5 @@
 import { nextRuns } from './lib/cron.js';
-import { DEFAULTS } from './lib/config.js';
+import { DEFAULTS, GLOBAL_DEFAULTS, gatewayOriginPattern } from './lib/config.js';
 
 const $ = id => document.getElementById(id);
 const send = msg => chrome.runtime.sendMessage(msg);
@@ -19,7 +19,28 @@ function readForm() {
     maxPages: $('maxPages').value,
     htmlMode: $('htmlMode').value,
     cacheDays: $('cacheDays').value,
+    topic: $('topic').value,
+    batchSize: $('batchSize').value,
   };
+}
+
+function readGlobal() {
+  return { gatewayUrl: $('gatewayUrl').value, apiKey: $('apiKey').value };
+}
+
+function fillGlobal(g) {
+  const v = { ...GLOBAL_DEFAULTS, ...(g || {}) };
+  $('gatewayUrl').value = v.gatewayUrl;
+  $('apiKey').value = v.apiKey;
+}
+
+// Xin quyền truy cập domain gateway. Phải gọi ngay trong thao tác bấm nút (Chrome yêu cầu).
+async function requestGatewayPermission() {
+  const pattern = gatewayOriginPattern($('gatewayUrl').value);
+  if (!pattern) return true; // URL sai sẽ được báo lỗi ở bước kiểm tra cấu hình
+  const ok = await chrome.permissions.request({ origins: [pattern] });
+  if (!ok) showErrors([`Chưa được cấp quyền truy cập ${pattern}, extension không gửi được dữ liệu lên gateway`]);
+  return ok;
 }
 
 function fillForm(cfg) {
@@ -33,6 +54,8 @@ function fillForm(cfg) {
   $('maxPages').value = c.maxPages;
   $('htmlMode').value = c.htmlMode;
   $('cacheDays').value = c.cacheDays;
+  $('topic').value = c.topic;
+  $('batchSize').value = c.batchSize;
   updateHints();
 }
 
@@ -67,17 +90,19 @@ function showErrors(list) {
 async function refresh() {
   const s = await send({ type: 'GET_STATE', tabId });
   if (!s?.ok) return;
-  if (!formFilled) { fillForm(s.cfg); formFilled = true; }
+  if (!formFilled) { fillForm(s.cfg); fillGlobal(s.global); formFilled = true; }
 
   const st = s.status || {};
   const badge = $('badge');
-  if (st.running) { badge.textContent = `Đang chạy · ${st.runSaved || 0} bài`; badge.className = 'badge running'; }
+  if (st.running) { badge.textContent = `Đang chạy · đã gửi ${st.runSent || 0}`; badge.className = 'badge running'; }
   else if (st.enabled) { badge.textContent = 'Đang bật'; badge.className = 'badge on'; }
   else { badge.textContent = 'Tắt'; badge.className = 'badge off'; }
 
   $('nextRun').textContent = st.enabled ? fmt(st.nextRunAt) : '— (lịch đang tắt)';
   $('lastRun').textContent = st.lastRunAt ? `${fmt(st.lastRunAt)} · ${st.lastRunSummary || ''}` : '—';
-  $('totalSaved').textContent = st.totalSaved || 0;
+  $('totalSent').textContent = st.totalSent || 0;
+  $('pendingCount').textContent = s.pendingCount;
+  $('btnFlush').hidden = !s.pendingCount;
   $('seenCount').textContent = s.seenCount;
   $('cacheKeep').textContent = s.cfg ? ` (giữ ${s.cfg.cacheDays ?? DEFAULTS.cacheDays} ngày)` : '';
 
@@ -110,15 +135,16 @@ function showTest(r) {
   $('testSample').textContent = r.sample ? JSON.stringify(r.sample, null, 2) : 'Không có bài nào để lấy mẫu — kiểm tra lại regex hoặc link cate.';
 }
 
+// fn được gọi ngay (đồng bộ) để chrome.permissions.request vẫn nằm trong thao tác bấm
 async function withBusy(btn, label, fn) {
-  const old = btn.textContent;
+  const old = btn.innerHTML;
   btn.disabled = true;
   btn.textContent = label;
-  try { await fn(); } finally { btn.textContent = old; btn.disabled = false; refresh(); }
+  try { await fn(); } finally { btn.innerHTML = old; btn.disabled = false; refresh(); }
 }
 
-// Side panel dùng chung cho cả cửa sổ: luôn làm việc với tab đang được xem.
-// (Có thể ép một tab cố định bằng sidepanel.html?tabId=123)
+// Mỗi tab có panel riêng: tab id nằm trên URL (sidepanel.html?tabId=123).
+// Nếu mở bằng panel mặc định (không có tabId) thì làm việc với tab đang xem và đổi theo khi chuyển tab.
 const pinnedTabId = Number(new URLSearchParams(location.search).get('tabId')) || null;
 
 async function resolveTabId() {
@@ -160,9 +186,31 @@ async function init() {
 
   ['cron', 'regex'].forEach(id => $(id).addEventListener('input', updateHints));
 
+  $('btnShowKey').addEventListener('click', () => {
+    const input = $('apiKey');
+    const show = input.type === 'password';
+    input.type = show ? 'text' : 'password';
+    $('btnShowKey').textContent = show ? 'Ẩn' : 'Hiện';
+  });
+
   $('btnSave').addEventListener('click', () => withBusy($('btnSave'), 'Đang lưu…', async () => {
-    const r = await send({ type: 'SAVE', tabId, raw: readForm(), enable: true });
+    showErrors([]);
+    if (!(await requestGatewayPermission())) return;
+    const r = await send({ type: 'SAVE', tabId, raw: readForm(), rawGlobal: readGlobal(), enable: true });
     showErrors(r?.ok ? [] : (r?.errors || [r?.error]));
+  }));
+
+  $('btnTestGw').addEventListener('click', () => withBusy($('btnTestGw'), 'Đang gửi thử…', async () => {
+    showErrors([]);
+    if (!(await requestGatewayPermission())) return;
+    const r = await send({ type: 'TEST_GATEWAY', tabId, rawGlobal: readGlobal(), topic: $('topic').value });
+    if (r?.ok) alert(`Gateway OK (HTTP ${r.status})${r.text ? `\n${r.text}` : ''}`);
+    else showErrors(r?.errors || [`Gateway lỗi: ${r?.error || 'không rõ'}`]);
+  }));
+
+  $('btnFlush').addEventListener('click', () => withBusy($('btnFlush'), 'đang gửi…', async () => {
+    const r = await send({ type: 'FLUSH_NOW', tabId });
+    showErrors(r?.ok ? [] : [`Gửi hàng chờ thất bại: ${r?.error || 'không rõ'}`]);
   }));
 
   $('btnStop').addEventListener('click', () => withBusy($('btnStop'), 'Đang tắt…', async () => {
@@ -182,7 +230,7 @@ async function init() {
   }));
 
   $('btnClear').addEventListener('click', async () => {
-    if (!confirm('Xoá cache? Lần chạy sau sẽ crawl lại cả những bài đã lấy.')) return;
+    if (!confirm('Xoá cache? Lần chạy sau sẽ crawl và gửi lại cả những bài đã gửi.')) return;
     await send({ type: 'CLEAR_CACHE', tabId });
     refresh();
   });
