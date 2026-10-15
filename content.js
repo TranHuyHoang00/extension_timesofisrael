@@ -25,8 +25,18 @@
     return { html, finalUrl: res.url, doc: new DOMParser().parseFromString(html, 'text/html') };
   }
 
+  // Hỏi background: trong các link này, link nào đã có trong cache (IndexedDB nằm ở background)
+  async function cachedOf(urls) {
+    if (!urls.length) return new Set();
+    const r = await chrome.runtime.sendMessage({ type: 'CACHE_FILTER', urls });
+    if (!r?.ok) throw new Error(r?.error || 'Không đọc được cache');
+    return new Set(r.seen);
+  }
+
   // Trang cate (hoặc home) + các lượt Load more → danh sách link bài mới
-  async function collectFromListing(startUrl, cfg, re, isSeen, maxPages) {
+  //   skip: link đã xử lý trong lượt chạy này (bài nằm ở nhiều cate chỉ lấy một lần)
+  //   useCache: false khi test, để thấy hết link
+  async function collectFromListing(startUrl, cfg, re, { skip = new Set(), useCache = true, maxPages }) {
     const origin = new URL(startUrl).origin;
     const found = [];
     const foundSet = new Set();
@@ -39,7 +49,8 @@
     for (let page = 0; ; page++) {
       checkAbort();
       const links = T.extractLinks(doc, startUrl, re);
-      const fresh = links.filter(u => !isSeen(u) && !foundSet.has(u));
+      const cached = useCache ? await cachedOf(links) : new Set();
+      const fresh = links.filter(u => !cached.has(u) && !skip.has(u) && !foundSet.has(u));
       fresh.forEach(u => { foundSet.add(u); found.push(u); });
       log(`${page === 0 ? 'Trang cate' : `Load more #${page}`}: ${links.length} link bài, ${fresh.length} mới`);
 
@@ -56,19 +67,12 @@
     return found;
   }
 
-  async function loadSeen(cfg) {
-    const key = `seen:${new URL(cfg.home).host}`;
-    const r = await chrome.storage.local.get(key);
-    return new Set(r[key] || []);
-  }
-
   // Lượt chạy thật: lần lượt từng cate → từng bài → gửi record về background để lưu
   async function run({ runId, config: cfg }) {
     const stats = { found: 0, saved: 0, errors: 0 };
     let error = null;
     try {
       const re = new RegExp(cfg.regex);
-      const seen = await loadSeen(cfg);
       const done = new Set();
       const sources = cfg.cates.length ? cfg.cates : [cfg.home];
 
@@ -77,7 +81,7 @@
         log(`Mở ${src}`);
         let links;
         try {
-          links = await collectFromListing(src, cfg, re, u => seen.has(u) || done.has(u), cfg.maxPages);
+          links = await collectFromListing(src, cfg, re, { skip: done, maxPages: cfg.maxPages });
         } catch (e) {
           if (e instanceof Aborted) throw e;
           stats.errors++;
@@ -88,13 +92,13 @@
 
         for (const url of links) {
           checkAbort();
+          done.add(url);   // đánh dấu đã xử lý trong lượt này (lỗi thì lượt sau thử lại vì chưa vào cache)
           await randomDelay(cfg);
           try {
             const { html, doc, finalUrl } = await fetchDoc(url);
             const record = T.buildRecord({ url, finalUrl, html, doc, source: src, htmlMode: cfg.htmlMode });
             const r = await chrome.runtime.sendMessage({ type: 'TOI_RECORD', runId, record });
             if (!r?.ok) throw new Error(r?.error || 'Background không lưu được');
-            done.add(url);
             stats.saved++;
           } catch (e) {
             stats.errors++;
@@ -111,13 +115,12 @@
   // Test: không lưu file, không ghi cache. Lấy link của nguồn đầu tiên + bóc thử 1 bài.
   async function test(cfg) {
     const re = new RegExp(cfg.regex);
-    const seen = await loadSeen(cfg);
     const src = cfg.cates[0] || cfg.home;
-    const links = await collectFromListing(src, cfg, re, () => false, Math.min(1, cfg.maxPages));
+    const links = await collectFromListing(src, cfg, re, { useCache: false, maxPages: Math.min(1, cfg.maxPages) });
     const result = {
       source: src,
       total: links.length,
-      alreadySeen: links.filter(u => seen.has(u)).length,
+      alreadySeen: (await cachedOf(links)).size,
       links: links.slice(0, 50),
       sample: null,
     };

@@ -2,7 +2,7 @@
 <html lang="vi">
   <head>
     <meta charset="utf-8" />
-    <title>TOI Crawler</title>
+    <title>TimeOfIsrael Crawler</title>
     <link rel="stylesheet" href="sidepanel.css" />
   </head>
   <body>
@@ -24,12 +24,12 @@
       </label>
 
       <label
-        >Link category
+        >Link cate
         <span class="muted">(mỗi dòng một link, để trống thì dùng home)</span>
         <textarea
           id="cates"
           rows="3"
-          placeholder="https://www.timesofisrael.com/israel-and-the-region/"
+          placeholder="https://www.timesofisrael.com/jewish-times/"
         ></textarea>
       </label>
 
@@ -59,13 +59,19 @@
         </label>
       </div>
 
-      <label
-        >HTML lưu lại
-        <select id="htmlMode">
-          <option value="article">Chỉ khối bài viết (#main-content)</option>
-          <option value="full">Toàn bộ trang</option>
-        </select>
-      </label>
+      <div class="row">
+        <label
+          >HTML lưu lại
+          <select id="htmlMode">
+            <option value="article">Chỉ khối bài viết (#main-content)</option>
+            <option value="full">Toàn bộ trang</option>
+          </select>
+        </label>
+        <label
+          >Giữ cache (ngày)
+          <input id="cacheDays" type="number" min="1" max="365" step="1" />
+        </label>
+      </div>
 
       <div id="errors" class="errors" hidden></div>
 
@@ -89,7 +95,10 @@
         <dd id="totalSaved">0</dd>
         <dt>Cache</dt>
         <dd>
-          <span id="seenCount">0</span> link
+          <span id="seenCount">0</span> link<span
+            id="cacheKeep"
+            class="muted"
+          ></span>
           <button type="button" id="btnClear" class="link">xoá cache</button>
         </dd>
       </dl>

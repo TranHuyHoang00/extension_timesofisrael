@@ -18,6 +18,7 @@ function readForm() {
     delayMax: $('delayMax').value,
     maxPages: $('maxPages').value,
     htmlMode: $('htmlMode').value,
+    cacheDays: $('cacheDays').value,
   };
 }
 
@@ -31,6 +32,7 @@ function fillForm(cfg) {
   $('delayMax').value = c.delayMax;
   $('maxPages').value = c.maxPages;
   $('htmlMode').value = c.htmlMode;
+  $('cacheDays').value = c.cacheDays;
   updateHints();
 }
 
@@ -77,6 +79,7 @@ async function refresh() {
   $('lastRun').textContent = st.lastRunAt ? `${fmt(st.lastRunAt)} · ${st.lastRunSummary || ''}` : '—';
   $('totalSaved').textContent = st.totalSaved || 0;
   $('seenCount').textContent = s.seenCount;
+  $('cacheKeep').textContent = s.cfg ? ` (giữ ${s.cfg.cacheDays ?? DEFAULTS.cacheDays} ngày)` : '';
 
   const err = $('lastError');
   err.hidden = !st.lastError;
@@ -114,12 +117,25 @@ async function withBusy(btn, label, fn) {
   try { await fn(); } finally { btn.textContent = old; btn.disabled = false; refresh(); }
 }
 
-// Panel được mở riêng cho một tab: tab id nằm trong URL (sidepanel.html?tabId=123)
+// Side panel dùng chung cho cả cửa sổ: luôn làm việc với tab đang được xem.
+// (Có thể ép một tab cố định bằng sidepanel.html?tabId=123)
+const pinnedTabId = Number(new URLSearchParams(location.search).get('tabId')) || null;
+
 async function resolveTabId() {
-  const fromUrl = Number(new URLSearchParams(location.search).get('tabId'));
-  if (fromUrl) return fromUrl;
+  if (pinnedTabId) return pinnedTabId;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab.id;
+}
+
+// Đổi sang tab khác → nạp cấu hình của tab đó (thay đổi chưa lưu ở tab cũ sẽ bị bỏ)
+async function switchTab(newId) {
+  if (newId === tabId) return;
+  tabId = newId;
+  formFilled = false;
+  showErrors([]);
+  $('testBox').hidden = true;
+  await updateTabInfo();
+  await refresh();
 }
 
 async function updateTabInfo() {
@@ -135,6 +151,12 @@ async function init() {
   tabId = await resolveTabId();
   await updateTabInfo();
   chrome.tabs.onUpdated.addListener((id, info) => { if (id === tabId && info.url) updateTabInfo(); });
+  if (!pinnedTabId) {
+    const win = await chrome.windows.getCurrent();
+    chrome.tabs.onActivated.addListener(({ tabId: id, windowId }) => {
+      if (windowId === win.id) switchTab(id);
+    });
+  }
 
   ['cron', 'regex'].forEach(id => $(id).addEventListener('input', updateHints));
 

@@ -1,16 +1,17 @@
 import { parseCron, nextRun } from './lib/cron.js';
-import { normalizeConfig } from './lib/config.js';
+import { normalizeConfig, DEFAULTS } from './lib/config.js';
+import * as cache from './lib/cache.js';
 
-// ---------- Khoá lưu trữ (mọi thứ gắn theo tab id, cache gắn theo host) ----------
+// ---------- Khoá lưu trữ (cấu hình/trạng thái/log gắn theo tab id; cache ở IndexedDB, gắn theo host) ----------
 const K = {
   cfg: id => `cfg:${id}`,
   st: id => `st:${id}`,
   log: id => `log:${id}`,
-  seen: host => `seen:${host}`,
 };
 const ALARM_PREFIX = 'crawl:';
-const SEEN_MAX = 5000;              // giữ tối đa 5000 link gần nhất mỗi site
+const DAY_MS = 24 * 3600 * 1000;
 const STALE_MS = 30 * 60 * 1000;    // cờ "đang chạy" quá 30 phút coi như treo
+const hostOf = cfg => new URL(cfg?.home || DEFAULTS.home).host;
 
 const get = async (key, def) => (await chrome.storage.local.get(key))[key] ?? def;
 const set = (key, val) => chrome.storage.local.set({ [key]: val });
@@ -36,11 +37,17 @@ const log = (tabId, text) => serial(async () => {
   await set(K.log(tabId), arr.slice(-150));
 });
 
-const markSeen = (host, url) => serial(async () => {
-  const arr = await get(K.seen(host), []);
-  if (!arr.includes(url)) arr.push(url);
-  await set(K.seen(host), arr.slice(-SEEN_MAX));
-});
+// Bản cũ lưu cache dạng mảng trong chrome.storage.local (khoá seen:<host>) → chuyển sang IndexedDB một lần
+async function migrateOldCache() {
+  const all = await chrome.storage.local.get(null);
+  for (const [key, urls] of Object.entries(all)) {
+    const m = key.match(/^seen:(.+)$/);
+    if (!m || !Array.isArray(urls)) continue;
+    const now = Date.now();
+    await cache.addMany(urls.map(url => ({ url, host: m[1], post_id: null, savedAt: now })));
+    await chrome.storage.local.remove(key);
+  }
+}
 
 // ---------- Lịch chạy ----------
 async function schedule(tabId) {
@@ -123,20 +130,32 @@ async function sweepOrphans() {
     if (m && !(await tabExists(Number(m[1])))) await cleanup(Number(m[1]));
   }
 }
-chrome.runtime.onStartup.addListener(sweepOrphans);
-chrome.runtime.onInstalled.addListener(sweepOrphans);
+// ---------- Side panel: mỗi tab một panel riêng ----------
+// manifest có side_panel.default_path → Chrome hiện mục "Open side panel" khi chuột phải vào icon.
+// Mỗi tab được gán thêm panel riêng (sidepanel.html?tabId=…), nên dù mở bằng icon hay bằng menu,
+// panel hiện ra là của đúng tab đó và giữ form/test/log riêng khi chuyển qua lại giữa các tab.
+const panelPath = tabId => `sidepanel.html?tabId=${tabId}`;
 
-// ---------- Side panel: mỗi tab một bảng cài đặt riêng ----------
-// Tắt panel mặc định, chỉ bật cho tab nào được bấm icon → panel không hiện lẫn sang tab khác
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.sidePanel.setOptions({ enabled: false }).catch(() => {});
-});
+async function setTabPanel(tabId) {
+  if (!chrome.sidePanel || tabId == null || tabId < 0) return;
+  try {
+    const cur = await chrome.sidePanel.getOptions({ tabId });
+    if (cur?.path === panelPath(tabId) && cur.enabled !== false) return; // đã gán, không gán lại (tránh tải lại panel đang mở)
+    await chrome.sidePanel.setOptions({ tabId, path: panelPath(tabId), enabled: true });
+  } catch {}
+}
 
-chrome.action.onClicked.addListener(tab => {
-  // Không await giữa hai lệnh: sidePanel.open phải chạy ngay trong thao tác bấm của người dùng
-  chrome.sidePanel.setOptions({ tabId: tab.id, path: `sidepanel.html?tabId=${tab.id}`, enabled: true });
-  chrome.sidePanel.open({ tabId: tab.id }).catch(e => console.warn('Không mở được side panel:', e));
-});
+async function setAllTabPanels() {
+  const tabs = await chrome.tabs.query({});
+  await Promise.all(tabs.map(t => setTabPanel(t.id)));
+}
+
+chrome.sidePanel?.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+chrome.tabs.onCreated.addListener(tab => { setTabPanel(tab.id); });
+chrome.tabs.onActivated.addListener(({ tabId }) => { setTabPanel(tabId); });
+
+chrome.runtime.onStartup.addListener(() => { sweepOrphans(); setAllTabPanels(); });
+chrome.runtime.onInstalled.addListener(() => { sweepOrphans(); setAllTabPanels(); migrateOldCache(); });
 
 // ---------- Chạy ----------
 async function startRun(tabId, reason) {
@@ -148,6 +167,9 @@ async function startRun(tabId, reason) {
     return { ok: false, error: 'Lượt trước chưa xong' };
   }
   try {
+    const days = cfg.cacheDays || DEFAULTS.cacheDays;
+    const purged = await cache.purgeOlderThan(hostOf(cfg), Date.now() - days * DAY_MS);
+    if (purged) await log(tabId, `Dọn ${purged} link quá ${days} ngày khỏi cache`);
     await ensureOnSite(tabId, cfg.home);
     await inject(tabId);
     const runId = `${tabId}-${Date.now()}`;
@@ -209,12 +231,16 @@ async function handle(msg, sender) {
       await log(tabIdFromSender, msg.text);
       return { ok: true };
 
+    // Content script hỏi: trong các link này, link nào đã có trong cache?
+    case 'CACHE_FILTER':
+      return { ok: true, seen: await cache.filterSeen(msg.urls || []) };
+
     case 'TOI_RECORD': {
       const tabId = tabIdFromSender;
       const st = await get(K.st(tabId), {});
       if (st.runId !== msg.runId) return { ok: false, error: 'Lượt chạy đã hết hiệu lực' };
       const file = await sinkRecord(msg.record);
-      await markSeen(new URL(msg.record.url).host, msg.record.url);
+      await cache.addSeen({ url: msg.record.url, host: new URL(msg.record.url).host, post_id: msg.record.post_id });
       await patchStatus(tabId, {
         runSaved: (st.runSaved || 0) + 1,
         totalSaved: (st.totalSaved || 0) + 1,
@@ -242,8 +268,7 @@ async function handle(msg, sender) {
       const cfg = await get(K.cfg(tabId));
       const status = await get(K.st(tabId), {});
       const logs = await get(K.log(tabId), []);
-      const host = cfg ? new URL(cfg.home).host : 'www.timesofisrael.com';
-      const seenCount = (await get(K.seen(host), [])).length;
+      const seenCount = await cache.countSeen(hostOf(cfg));
       return { ok: true, cfg, status, logs, seenCount };
     }
 
@@ -282,10 +307,9 @@ async function handle(msg, sender) {
     }
 
     case 'CLEAR_CACHE': {
-      const cfg = await get(K.cfg(msg.tabId));
-      const host = cfg ? new URL(cfg.home).host : 'www.timesofisrael.com';
-      await serial(() => chrome.storage.local.remove(K.seen(host)));
-      await log(msg.tabId, `Đã xoá cache của ${host}`);
+      const host = hostOf(await get(K.cfg(msg.tabId)));
+      const n = await cache.clearHost(host);
+      await log(msg.tabId, `Đã xoá ${n} link khỏi cache của ${host}`);
       return { ok: true };
     }
   }
