@@ -62,7 +62,7 @@ textarea { resize: vertical; }
 #regex, #cron { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
-.row { display: grid; grid-template-columns: 1fr 120px; gap: 10px; }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .pair { display: flex; align-items: center; gap: 6px; font-weight: 400; }
 .pair input { margin-top: 4px; }
 
