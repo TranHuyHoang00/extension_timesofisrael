@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Times of Israel Crawler",
+  "name": "TimesOfIsrael",
   "version": "0.1.0",
-  "description": "Crawl bài viết Times of Israel theo lịch cron, mỗi tab một cấu hình. Bản test: lưu JSON ra file thay vì đẩy Kafka.",
+  "description": "Extract data",
   "permissions": [
     "storage",
     "alarms",
@@ -20,7 +20,7 @@
     "type": "module"
   },
   "action": {
-    "default_title": "TOI Crawler – mở bảng cài đặt cho tab này"
+    "default_title": "TimesOfIsrael"
   },
   "minimum_chrome_version": "116"
 }
