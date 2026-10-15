@@ -24,8 +24,5 @@
   "action": {
     "default_title": "TimesOfIsrael"
   },
-  "side_panel": {
-    "default_path": "sidepanel.html"
-  },
   "minimum_chrome_version": "116"
 }
