@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <title>TOI Crawler</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <header>
+      <div>
+        <div id="tabInfo" class="muted"></div>
+      </div>
+      <span id="badge" class="badge off">Tắt</span>
+    </header>
+
+    <form id="form" autocomplete="off">
+      <label
+        >Link home
+        <input
+          id="home"
+          type="url"
+          placeholder="https://www.timesofisrael.com/"
+        />
+      </label>
+
+      <label
+        >Link category
+        <span class="muted">(mỗi dòng một link, để trống thì dùng home)</span>
+        <textarea
+          id="cates"
+          rows="3"
+          placeholder="https://www.timesofisrael.com/jewish-times/"
+        ></textarea>
+      </label>
+
+      <label
+        >Lịch chạy (cron) <span class="muted">phút giờ ngày tháng thứ</span>
+        <input id="cron" type="text" placeholder="*/30 * * * *" />
+        <small id="cronHint" class="hint"></small>
+      </label>
+
+      <label
+        >Regex lọc link bài viết
+        <input id="regex" type="text" spellcheck="false" />
+        <small id="regexHint" class="hint"></small>
+      </label>
+
+      <div class="row">
+        <label
+          >Delay ngẫu nhiên (giây)
+          <span class="pair">
+            <input id="delayMin" type="number" min="0" max="120" step="0.5" /> –
+            <input id="delayMax" type="number" min="0" max="120" step="0.5" />
+          </span>
+        </label>
+        <label
+          >Load more tối đa
+          <input id="maxPages" type="number" min="0" max="20" step="1" />
+        </label>
+      </div>
+
+      <label
+        >HTML lưu lại
+        <select id="htmlMode">
+          <option value="full">Toàn bộ trang</option>
+          <option value="article">Chỉ khối bài viết (#main-content)</option>
+        </select>
+      </label>
+
+      <div id="errors" class="errors" hidden></div>
+
+      <div class="actions">
+        <button type="button" id="btnSave" class="primary">
+          Lưu &amp; bật lịch
+        </button>
+        <button type="button" id="btnStop">Tắt lịch</button>
+        <button type="button" id="btnRun">Chạy ngay</button>
+        <button type="button" id="btnTest">Test</button>
+      </div>
+    </form>
+
+    <section class="status">
+      <dl>
+        <dt>Lần chạy tới</dt>
+        <dd id="nextRun">—</dd>
+        <dt>Lần chạy trước</dt>
+        <dd id="lastRun">—</dd>
+        <dt>Đã lưu (tab này)</dt>
+        <dd id="totalSaved">0</dd>
+        <dt>Cache</dt>
+        <dd>
+          <span id="seenCount">0</span> link
+          <button type="button" id="btnClear" class="link">xoá cache</button>
+        </dd>
+      </dl>
+      <div id="lastError" class="errors" hidden></div>
+    </section>
+
+    <section id="testBox" hidden>
+      <h2>Kết quả test</h2>
+      <div id="testSummary"></div>
+      <details>
+        <summary>Danh sách link</summary>
+        <ol id="testLinks"></ol>
+      </details>
+      <details open>
+        <summary>Bài mẫu (đã rút gọn content và html)</summary>
+        <pre id="testSample"></pre>
+      </details>
+    </section>
+
+    <section>
+      <h2>Nhật ký</h2>
+      <pre id="logs" class="logs"></pre>
+    </section>
+
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+</html>
