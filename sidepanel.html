@@ -104,25 +104,23 @@
 
       <div id="errors" class="errors" hidden></div>
 
-      <div class="actions">
-        <button type="button" id="btnSave" class="primary">
-          Lưu &amp; bật lịch
-        </button>
-        <button type="button" id="btnStop">Tắt lịch</button>
-        <button type="button" id="btnRun">Chạy ngay</button>
-        <button type="button" id="btnTest">Test crawl</button>
-        <button hidden type="button" id="btnTestGw" class="wide">
-          Test gateway <span class="muted">(gửi 1 message test vào topic)</span>
-        </button>
-      </div>
+      <fieldset id="bfBox">
+        <legend>Lịch chạy tự động</legend>
+        <div class="actions">
+          <button type="button" id="btnSave" class="primary">
+            Lưu &amp; bật lịch
+          </button>
+          <button type="button" id="btnStop">Tắt lịch</button>
+          <button type="button" id="btnRun">Chạy ngay</button>
+          <button type="button" id="btnTest">Test crawl</button>
+          <button hidden type="button" id="btnTestGw" class="wide">
+            Test gateway <span class="muted">(gửi 1 message test vào topic)</span>
+          </button>
+        </div>
+      </fieldset>
 
       <fieldset id="bfBox">
         <legend>Lấy toàn bộ bài cũ</legend>
-        <small class="hint"
-          >Đi từ trang đầu tới trang cuối của từng cate. Xong trang nào lưu vị
-          trí trang đó; bị ngắt thì bấm lại (hoặc tự chạy tiếp) từ đúng chỗ cũ.
-          Không dùng cùng lúc với lịch.</small
-        >
         <div class="actions">
           <button type="button" id="btnBfStart" class="primary">
             Bắt đầu / Tiếp tục
