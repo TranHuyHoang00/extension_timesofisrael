@@ -5,6 +5,7 @@
   "description": "Crawl data",
   "permissions": [
     "storage",
+    "unlimitedStorage",
     "alarms",
     "tabs",
     "scripting",

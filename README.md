@@ -35,6 +35,30 @@ Extension Chrome (Manifest V3) crawl bài viết Times of Israel theo lịch cro
 
 Mọi request tới site chạy bằng `fetch` từ trong tab của site nên mang cookie của trang.
 
+## Lấy toàn bộ bài cũ
+
+Khu **Lấy toàn bộ bài cũ** trong side panel: đi từ trang đầu tới **trang cuối** của từng cate (không giới hạn số trang), xong cate này sang cate kia.
+
+- **Mỗi tab một chế độ**: tab đang bật lịch thì khoá Lấy toàn bộ (tắt lịch trước), tab đang Lấy toàn bộ thì khoá lịch, Chạy ngay, Test crawl.
+- **Dấu trang**: xong trọn một trang thì lưu tham số Load more của trang kế tiếp (gồm `before_date`) cho cate đó. Lưu theo **link cate** trong `chrome.storage.local` (khoá `bfpos`), nên đóng tab / tắt Chrome vẫn còn. Dùng mốc thời gian chứ không dùng số trang, nên site đăng thêm bài mới trong lúc lấy cũng không làm lệch vị trí.
+- **Bắt đầu / Tiếp tục**: chạy tiếp từ dấu trang; cate đã xong thì bỏ qua. Trang đang dở lúc bị ngắt được làm lại, bài đã gửi được cache bỏ qua nên không gửi trùng.
+- **Dừng**: dừng ngay, giữ dấu trang. **Làm lại từ đầu**: xoá dấu trang của các cate đang cấu hình.
+- Khác chế độ lịch: gặp trang toàn bài đã lấy vẫn đi tiếp (lịch thì dừng ở đó).
+- Xong hết các cate thì tự thoát chế độ Lấy toàn bộ; lúc đó có thể bật lịch để lấy bài mới.
+
+## Bị chặn, mất mạng: tự F5 và tự chạy tiếp
+
+Áp dụng cho cả chế độ lịch và Lấy toàn bộ.
+
+1. Tải trang / bài bị **403, 407, 408, 429, 5xx, trang kiểm tra Cloudflare, lỗi mạng** → chờ 20 giây thử lại tại chỗ, tối đa 2 lần.
+2. Vẫn bị → **tự F5 tab**. Trang tải xong, chờ 5 giây: còn ở trang kiểm tra Cloudflare thì đợi giải xong; không thì **tự chạy tiếp** (Lấy toàn bộ: từ dấu trang; lịch: chạy lại lượt, bài đã gửi được bỏ qua).
+3. **Watchdog** (mỗi phút): tab đang chạy mà **3 phút** không có tín hiệu (mất mạng ra trang lỗi, kẹt ở trang Cloudflare) → tự F5.
+4. Tự F5 **10 lần liên tiếp** mà không lấy thêm được bài nào → dừng hẳn, ghi "Lỗi gần nhất". Lấy được bài thì bộ đếm về 0.
+5. Gateway lỗi → dừng (F5 không giúp gì), bài đã crawl nằm trong hàng chờ.
+6. Người dùng tự F5 tab đang Lấy toàn bộ → cũng tự chạy tiếp.
+
+Trạng thái "đang Lấy toàn bộ" / "chờ tự chạy tiếp" nằm trong `chrome.storage.session` (chỉ trong RAM, tắt Chrome là mất). Mở lại Chrome, cấu hình lại tab rồi bấm **Bắt đầu / Tiếp tục**: chạy tiếp từ dấu trang đã lưu.
+
 ## Request gửi lên gateway
 
 ```
@@ -85,7 +109,7 @@ Dữ liệu nằm trong **IndexedDB** của extension (database `toi_crawler`), 
 
 | Bảng     | Ý nghĩa                                                                                               |
 | -------- | ----------------------------------------------------------------------------------------------------- |
-| `claims` | Đang được một lượt chạy xử lý (giữ chỗ 10 phút). Tab khác thấy thì bỏ qua                             |
+| `claims` | Đang được một lượt chạy xử lý (giữ chỗ 10 phút). Tab khác thấy thì bỏ qua. Tab bắt đầu lượt mới thì trả lại chỗ giữ của các lượt cũ trong chính tab đó |
 | `outbox` | Đã crawl, đang chờ gửi Kafka. Tối đa 300 bài; đầy thì lượt chạy dừng. Quá 7 ngày chưa gửi được thì bỏ |
 | `seen`   | Đã gửi Kafka thành công (cache). Giữ theo số ngày cài đặt                                             |
 

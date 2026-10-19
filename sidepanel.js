@@ -94,9 +94,22 @@ async function refresh() {
 
   const st = s.status || {};
   const badge = $('badge');
-  if (st.running) { badge.textContent = `Đang chạy · đã gửi ${st.runSent || 0}`; badge.className = 'badge running'; }
+  if (s.bfActive) { badge.textContent = `Lấy toàn bộ${st.running ? ` · đã gửi ${st.runSent || 0}` : ' · chờ chạy tiếp'}`; badge.className = 'badge backfill'; }
+  else if (st.running) { badge.textContent = `Đang chạy · đã gửi ${st.runSent || 0}`; badge.className = 'badge running'; }
   else if (st.enabled) { badge.textContent = 'Đang bật'; badge.className = 'badge on'; }
   else { badge.textContent = 'Tắt'; badge.className = 'badge off'; }
+
+  // Mỗi tab một chế độ: đang bật lịch thì khoá Lấy toàn bộ, đang Lấy toàn bộ thì khoá lịch
+  const bf = !!s.bfActive;
+  $('btnSave').disabled = bf;
+  $('btnBfStart').disabled = bf || !!st.enabled || !!st.running;
+  $('btnBfStop').disabled = !bf;
+  $('btnBfReset').disabled = bf || !!st.running || !s.bfProgress?.some(p => p.pages || p.done);
+  $('btnTest').disabled = bf || !!st.running;
+  $('bfHint').textContent = st.enabled
+    ? 'Đang bật lịch: tắt lịch để dùng Lấy toàn bộ.'
+    : bf ? 'Đang Lấy toàn bộ: lịch bị khoá cho đến khi xong hoặc bấm Dừng.' : '';
+  renderBfProgress(s.bfProgress || []);
 
   $('nextRun').textContent = st.enabled ? fmt(st.nextRunAt) : '— (lịch đang tắt)';
   $('lastRun').textContent = st.lastRunAt ? `${fmt(st.lastRunAt)} · ${st.lastRunSummary || ''}` : '—';
@@ -110,13 +123,34 @@ async function refresh() {
   err.hidden = !st.lastError;
   err.textContent = st.lastError ? `Lỗi gần nhất: ${st.lastError}` : '';
 
-  $('btnRun').disabled = !!st.running || !s.cfg;
-  $('btnStop').disabled = !st.enabled && !st.running;
+  $('btnRun').disabled = !!st.running || !s.cfg || bf;
+  $('btnStop').disabled = bf || (!st.enabled && !st.running);
 
   const logs = $('logs');
   const atBottom = logs.scrollTop + logs.clientHeight >= logs.scrollHeight - 4;
   logs.textContent = (s.logs || []).slice(-60).join('\n') || 'Chưa có hoạt động';
   if (atBottom) logs.scrollTop = logs.scrollHeight;
+}
+
+// Tiến độ Lấy toàn bộ của từng cate: số trang đã xong, đã lùi tới ngày nào, xong chưa
+function renderBfProgress(list) {
+  const ul = $('bfProgress');
+  ul.innerHTML = '';
+  for (const p of list) {
+    const li = document.createElement('li');
+    const cate = document.createElement('span');
+    cate.className = 'cate';
+    cate.textContent = p.cate.replace(/^https?:\/\/[^/]+/, '') || '/';
+    const state = document.createElement('span');
+    state.className = 'state' + (p.done ? ' done' : '');
+    state.textContent = p.done
+      ? `Xong · ${p.pages} trang`
+      : p.pages
+        ? `${p.pages} trang · tới ${p.beforeDate ? new Date(p.beforeDate).toLocaleDateString('vi-VN') : '?'}`
+        : 'Chưa bắt đầu';
+    li.append(cate, state);
+    ul.appendChild(li);
+  }
 }
 
 function showTest(r) {
@@ -228,6 +262,24 @@ async function init() {
     if (r?.ok) showTest(r.result);
     else showErrors(r?.errors || [r?.error || 'Test thất bại']);
   }));
+
+  $('btnBfStart').addEventListener('click', () => withBusy($('btnBfStart'), 'Đang khởi động…', async () => {
+    showErrors([]);
+    if (!(await requestGatewayPermission())) return;
+    const r = await send({ type: 'BF_START', tabId, raw: readForm(), rawGlobal: readGlobal() });
+    showErrors(r?.ok ? [] : (r?.errors || [r?.error || 'Không chạy được']));
+  }));
+
+  $('btnBfStop').addEventListener('click', () => withBusy($('btnBfStop'), 'Đang dừng…', async () => {
+    await send({ type: 'BF_STOP', tabId });
+  }));
+
+  $('btnBfReset').addEventListener('click', async () => {
+    if (!confirm('Xoá vị trí đã lưu? Lần sau Lấy toàn bộ sẽ quét lại từ trang 1 (bài đã gửi vẫn được bỏ qua nhờ cache).')) return;
+    const r = await send({ type: 'BF_RESET', tabId });
+    showErrors(r?.ok ? [] : [r?.error || 'Không xoá được']);
+    refresh();
+  });
 
   $('btnClear').addEventListener('click', async () => {
     if (!confirm('Xoá cache? Lần chạy sau sẽ crawl và gửi lại cả những bài đã gửi.')) return;

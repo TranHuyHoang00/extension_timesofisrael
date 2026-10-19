@@ -121,6 +121,26 @@
           Test gateway <span class="muted">(gửi 1 message test vào topic)</span>
         </button>
       </div>
+
+      <fieldset id="bfBox">
+        <legend>Lấy toàn bộ bài cũ</legend>
+        <small class="hint"
+          >Đi từ trang đầu tới trang cuối của từng cate. Xong trang nào lưu vị
+          trí trang đó; bị ngắt thì bấm lại (hoặc tự chạy tiếp) từ đúng chỗ cũ.
+          Không dùng cùng lúc với lịch.</small
+        >
+        <div class="actions">
+          <button type="button" id="btnBfStart" class="primary">
+            Bắt đầu / Tiếp tục
+          </button>
+          <button type="button" id="btnBfStop">Dừng</button>
+          <button type="button" id="btnBfReset" class="wide">
+            Làm lại từ đầu
+          </button>
+        </div>
+        <small id="bfHint" class="hint"></small>
+        <ul id="bfProgress" class="bf-progress"></ul>
+      </fieldset>
     </form>
 
     <section class="status">
