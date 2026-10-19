@@ -92,6 +92,8 @@
   // Xử lý một bài: giữ chỗ → tải → bóc → đưa vào hàng chờ gửi Kafka (background gửi khi đủ batch)
   async function processArticle(url, src, cfg, runId, stats) {
     const c = await send({ type: "CLAIM", url, owner: runId });
+    if (c?.stale)
+      throw new Fatal("Lượt chạy này đã được thay bằng lượt mới, dừng");
     if (!c?.granted) {
       stats.skipped++;
       log(`Bỏ qua (đã gửi / đang chờ gửi / tab khác đang xử lý): ${url}`);

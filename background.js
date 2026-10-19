@@ -19,7 +19,7 @@ const K = {
 };
 const ALARM_PREFIX = "crawl:";
 const DAY_MS = 24 * 3600 * 1000;
-const STALE_MS = 30 * 60 * 1000; // cờ "đang chạy" quá 30 phút coi như treo
+const IDLE_MS = 10 * 60 * 1000; // lượt chạy 10 phút liền không có hoạt động gì → coi như treo
 const CLAIM_TTL_MS = 10 * 60 * 1000; // giữ chỗ một bài tối đa 10 phút
 const MAX_BATCH_BYTES = 4 * 1024 * 1024; // dữ liệu một batch ~4 MB (body request ~5 MB sau khi mã hoá chuỗi)
 const OUTBOX_MAX = 300; // hàng chờ tối đa 300 bài, đầy thì dừng crawl
@@ -356,13 +356,33 @@ async function housekeeping(tabId, cfg) {
   if (dropped) await log(tabId, `Bỏ ${dropped} bài chờ gửi quá 7 ngày`);
 }
 
+// Ghi nhận "lượt chạy vẫn đang làm việc" (mỗi lần quét trang, giữ chỗ bài, gửi bài).
+// Ghi tối đa 30 giây một lần cho đỡ tốn.
+const lastTouch = new Map();
+async function touch(tabId) {
+  if (tabId == null) return;
+  const now = Date.now();
+  if (now - (lastTouch.get(tabId) || 0) < 30000) return;
+  lastTouch.set(tabId, now);
+  await patchStatus(tabId, (st) => (st.running ? { lastActivity: now } : {}));
+}
+
 async function startRun(tabId, reason) {
   const cfg = await get(K.cfg(tabId));
   if (!cfg) return { ok: false, error: "Tab này chưa lưu cấu hình" };
   const st = await get(K.st(tabId), {});
-  if (st.running && Date.now() - (st.runningSince || 0) < STALE_MS) {
-    await log(tabId, `Bỏ qua (${reason}): lượt trước chưa xong`);
-    return { ok: false, error: "Lượt trước chưa xong" };
+  if (st.running) {
+    // Lượt trước còn đang làm việc (dù đã chạy bao lâu) → bỏ qua lượt này.
+    // Chỉ khi 10 phút liền không có hoạt động gì mới coi là treo và chạy lượt mới.
+    const idle = Date.now() - (st.lastActivity || st.runningSince || 0);
+    if (idle < IDLE_MS) {
+      await log(tabId, `Bỏ qua (${reason}): lượt trước chưa xong`);
+      return { ok: false, error: "Lượt trước chưa xong" };
+    }
+    await log(
+      tabId,
+      `Lượt trước ${Math.round(idle / 60000)} phút không hoạt động, coi như treo → chạy lượt mới`,
+    );
   }
   try {
     await checkGateway();
@@ -385,6 +405,7 @@ async function startRun(tabId, reason) {
     await patchStatus(tabId, {
       running: true,
       runningSince: Date.now(),
+      lastActivity: Date.now(),
       runId,
       runSent: 0,
       lastError: null,
@@ -411,20 +432,28 @@ async function handle(msg, sender) {
     // --- từ content script ---
     case "TOI_LOG":
       await log(tabIdFromSender, msg.text);
+      await touch(tabIdFromSender);
       return { ok: true };
 
     // Link nào không cần crawl (đã gửi / đang chờ gửi / lượt khác đang giữ chỗ)
     case "CACHE_FILTER":
+      await touch(tabIdFromSender);
       return {
         ok: true,
         seen: await store.known(msg.urls || [], msg.owner || null),
       };
 
-    case "CLAIM":
+    case "CLAIM": {
+      // Lượt cũ (đã bị thay bằng lượt mới) hỏi tiếp → báo nó dừng, không cho giữ chỗ
+      const st = await get(K.st(tabIdFromSender), {});
+      if (st.runId && st.runId !== msg.owner)
+        return { ok: true, granted: false, stale: true };
+      await touch(tabIdFromSender);
       return {
         ok: true,
         granted: await store.claim(msg.url, msg.owner, CLAIM_TTL_MS),
       };
+    }
 
     case "RELEASE":
       await store.release(msg.url, msg.owner);
@@ -433,8 +462,15 @@ async function handle(msg, sender) {
     case "TOI_RECORD": {
       const tabId = tabIdFromSender;
       const st = await get(K.st(tabId), {});
-      if (st.runId !== msg.runId)
-        return { ok: false, error: "Lượt chạy đã hết hiệu lực" };
+      if (st.runId !== msg.runId) {
+        await store.release(msg.record.url, msg.runId);
+        return {
+          ok: false,
+          fatal: true,
+          error: "Lượt chạy này đã được thay bằng lượt mới",
+        };
+      }
+      await touch(tabId);
       const cfg = await get(K.cfg(tabId));
       const rec = msg.record;
       const host = new URL(rec.url).host;
@@ -479,6 +515,12 @@ async function handle(msg, sender) {
 
     case "TOI_DONE": {
       const tabId = tabIdFromSender;
+      // Lượt cũ kết thúc sau khi đã có lượt mới → không đụng vào trạng thái của lượt mới
+      const cur = await get(K.st(tabId), {});
+      if (msg.runId && cur.runId && cur.runId !== msg.runId) {
+        await log(tabId, "Lượt cũ (đã bị thay) đã dừng");
+        return { ok: true };
+      }
       const cfg = await get(K.cfg(tabId));
       const s = msg.stats || {};
       let error = msg.error || null;
