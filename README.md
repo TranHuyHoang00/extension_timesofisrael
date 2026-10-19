@@ -1,4 +1,6 @@
-Extension Chrome (Manifest V3) crawl bài viết Times of Israel theo lịch cron và gửi lên Kafka qua gateway theo batch. Mỗi tab có cấu hình riêng nên chạy được nhiều tab cùng lúc.
+Extension Chrome (Manifest V3) crawl bài viết theo lịch cron và gửi lên Kafka qua gateway theo batch. Mỗi tab có cấu hình riêng nên chạy được nhiều tab cùng lúc.
+
+Phần chung (lịch, Lấy toàn bộ, cache, Kafka, tự F5 khi bị chặn) dùng cho mọi site; mỗi site chỉ cần một file riêng để đọc trang của site đó. Hiện có: **Times of Israel**. Thêm site: xem mục [Thêm site mới](#thêm-site-mới).
 
 ## Cài đặt
 
@@ -10,12 +12,13 @@ Extension Chrome (Manifest V3) crawl bài viết Times of Israel theo lịch cro
 
 1. Mở một tab `https://www.timesofisrael.com/` (tab này dành riêng cho crawler, đừng dùng để lướt web).
 2. Bấm icon extension (hoặc chuột phải vào icon → **Open side panel**). Side panel **riêng của tab này** mở ở bên phải (cần Chrome 116+). Nhập cấu hình:
+   - **Site**: chọn site. Đổi site thì link home và regex tự đổi theo mặc định của site đó.
    - **Link home**: trang chủ.
    - **Link cate**: mỗi dòng một chuyên mục, ví dụ `https://www.timesofisrael.com/jewish-times/`. Để trống thì crawl từ home.
    - **Cron**: ví dụ `*/30 * * * *`. Ô bên dưới hiện 3 lần chạy tiếp theo để kiểm tra.
-   - **Regex**: mặc định lấy link dạng `https://www.timesofisrael.com/<slug-dai-nhieu-tu>/`.
+   - **Regex**: lọc link bài. Để trống thì dùng regex mặc định của site (TOI: link dạng `https://www.timesofisrael.com/<slug-dai-nhieu-tu>/`).
    - **Delay ngẫu nhiên**: chờ ngẫu nhiên trong khoảng này trước mỗi request tới site.
-   - **Load more tối đa**: số lần gọi API Load more cho mỗi cate (0 = chỉ lấy bài render sẵn).
+   - **Số trang quét mỗi Cate**: ngoài trang cate, quét thêm bao nhiêu trang kế tiếp (TOI: mỗi trang = một lần bấm Load more; 0 = chỉ trang cate).
    - **HTML gửi đi**: toàn trang, hoặc chỉ khối `#main-content` (nhẹ hơn khoảng 10–20%).
    - **Giữ cache (ngày)**: link đã gửi được nhớ bao lâu để không gửi lại (mặc định 30).
    - **Kafka**:
@@ -28,7 +31,7 @@ Extension Chrome (Manifest V3) crawl bài viết Times of Israel theo lịch cro
 ## Luồng chạy
 
 1. Đầu lượt: dọn cache quá hạn, gửi nốt **hàng chờ** còn lại từ lượt trước. Gateway lỗi thì dừng, không crawl thêm.
-2. Với từng link cate (không có thì home): tải trang → lọc link bài bằng regex → gọi API Load more → dừng khi hết nút, đủ số lần, hoặc cả lượt toàn bài đã biết.
+2. Với từng link cate (không có thì home): tải trang → lọc link bài bằng regex → sang trang kế tiếp → dừng khi hết trang, đủ số trang, hoặc cả trang toàn bài đã biết.
 3. Với từng bài mới: **giữ chỗ** → tải → bóc dữ liệu → đưa vào **hàng chờ gửi**.
 4. Hàng chờ đủ **batch size** hoặc khoảng **4 MB dữ liệu** thì gửi một request lên gateway. Hết lượt thì gửi nốt phần còn lại.
 5. Batch gửi thành công thì các bài được xoá khỏi hàng chờ và ghi vào **cache**.
@@ -40,7 +43,7 @@ Mọi request tới site chạy bằng `fetch` từ trong tab của site nên ma
 Khu **Lấy toàn bộ bài cũ** trong side panel: đi từ trang đầu tới **trang cuối** của từng cate (không giới hạn số trang), xong cate này sang cate kia.
 
 - **Mỗi tab một chế độ**: tab đang bật lịch thì khoá Lấy toàn bộ (tắt lịch trước), tab đang Lấy toàn bộ thì khoá lịch, Chạy ngay, Test crawl.
-- **Dấu trang**: xong trọn một trang thì lưu tham số Load more của trang kế tiếp (gồm `before_date`) cho cate đó. Lưu theo **link cate** trong `chrome.storage.local` (khoá `bfpos`), nên đóng tab / tắt Chrome vẫn còn. Dùng mốc thời gian chứ không dùng số trang, nên site đăng thêm bài mới trong lúc lấy cũng không làm lệch vị trí.
+- **Dấu trang**: xong trọn một trang thì lưu **con trỏ** của trang kế tiếp cho cate đó. Lưu theo **link cate** trong `chrome.storage.local` (khoá `bfpos`), nên đóng tab / tắt Chrome vẫn còn. Với TOI, con trỏ là tham số Load more (gồm mốc thời gian `before_date`), nên site đăng thêm bài mới trong lúc lấy cũng không làm lệch vị trí.
 - **Bắt đầu / Tiếp tục**: chạy tiếp từ dấu trang; cate đã xong thì bỏ qua. Trang đang dở lúc bị ngắt được làm lại, bài đã gửi được cache bỏ qua nên không gửi trùng.
 - **Dừng**: dừng ngay, giữ dấu trang. **Làm lại từ đầu**: xoá dấu trang của các cate đang cấu hình.
 - Khác chế độ lịch: gặp trang toàn bài đã lấy vẫn đi tiếp (lịch thì dừng ở đó).
@@ -58,6 +61,32 @@ Khu **Lấy toàn bộ bài cũ** trong side panel: đi từ trang đầu tới 
 6. Người dùng tự F5 tab đang Lấy toàn bộ → cũng tự chạy tiếp.
 
 Trạng thái "đang Lấy toàn bộ" / "chờ tự chạy tiếp" nằm trong `chrome.storage.session` (chỉ trong RAM, tắt Chrome là mất). Mở lại Chrome, cấu hình lại tab rồi bấm **Bắt đầu / Tiếp tục**: chạy tiếp từ dấu trang đã lưu.
+
+## Cấu trúc thư mục
+
+| File | Việc |
+| --- | --- |
+| `background.js` | Lịch, khởi động lượt chạy, Lấy toàn bộ, tự F5, gửi Kafka (chung) |
+| `content.js` | Chạy trong tab: tải trang, đi qua các trang, xử lý từng bài, chống chặn (chung) |
+| `lib/sites.js` | **Danh sách site**: tên, host, link home, regex mặc định, file xử lý |
+| `lib/site-utils.js` | Hàm dùng chung cho các file site (lọc link, làm sạch HTML, đổi giờ) |
+| `sites/<site>.js` | **Phần riêng của từng site**: đọc trang danh sách, sang trang kế tiếp, bóc bài |
+| `sites/_template.js` | Mẫu để làm site mới |
+| `lib/config.js`, `lib/cache.js`, `lib/cron.js` | Kiểm tra cấu hình, IndexedDB, cron (chung) |
+
+## Thêm site mới
+
+1. Chép `sites/_template.js` thành `sites/<id>.js` (id viết liền không dấu, ví dụ `vnexpress`), đổi `ID` trong file.
+2. Sửa 4 hàm trong file đó theo trang của site:
+   - `parseList(doc, { pageUrl, re, cursor })` → `{ links, next }`: link bài trên trang, và **con trỏ** của trang kế tiếp (`null` = hết). Con trỏ là dữ liệu JSON (số trang, mốc thời gian, tham số API…), được lưu lại để Lấy toàn bộ chạy tiếp.
+   - `pageUrl(cursor, { cateUrl })` → URL cần tải cho con trỏ đó.
+   - `cursorLabel(cursor)` → chữ hiện trong tiến độ (không bắt buộc).
+   - `parseArticle({ url, finalUrl, html, doc, source, htmlMode })` → bản ghi, **giữ đúng các trường** ở mục dưới để phía Kafka không phải đổi.
+3. Khai báo site trong `lib/sites.js`: `name`, `hosts`, `script`, `home`, `regex`, `catePlaceholder`.
+4. Thêm `"https://<host>/*"` vào `host_permissions` trong `manifest.json`.
+5. Reload extension, chọn site trong side panel, bấm **Test crawl** để kiểm tra.
+
+Lưu ý: cache chống trùng nằm trong từng Chrome profile. Nếu chạy mỗi site / mỗi nhóm cate ở một profile riêng thì các profile không biết bài của nhau, nên đừng cho hai profile quét cùng một cate.
 
 ## Request gửi lên gateway
 
@@ -120,11 +149,11 @@ Dữ liệu nằm trong **IndexedDB** của extension (database `toi_crawler`), 
 - Nút **xoá cache** trong side panel để crawl và gửi lại từ đầu. Nút **gửi ngay** để gửi hàng chờ mà không cần đợi lượt sau.
 - Xem dữ liệu: `chrome://extensions` → bấm **service worker** của extension → DevTools → tab **Application** → **IndexedDB** → `toi_crawler`.
 
-**Lưu ý:** số ngày giữ cache nên dài hơn tuổi của bài cũ nhất mà crawler còn với tới (trang cate + số lần Load more). Backend vẫn nên chống trùng theo `post_id`, vì cài lại extension hay chạy trên máy khác sẽ mất cache.
+**Lưu ý:** số ngày giữ cache nên dài hơn tuổi của bài cũ nhất mà crawler còn với tới (trang cate + số trang quét mỗi cate). Backend vẫn nên chống trùng theo `post_id`, vì cài lại extension hay chạy trên máy khác sẽ mất cache.
 
 ## Giới hạn
 
 - Cấu hình gắn theo **tab id**. Đóng tab hoặc khởi động lại Chrome thì tab id đổi, cấu hình cũ bị dọn, cần cấu hình lại. Cấu hình gateway (URL, API key) và dữ liệu chống trùng vẫn giữ nguyên.
 - Tab phải mở và ở đúng site. Nếu tab bị chuyển trang, extension tự quay về link home ở lượt sau; lượt đang chạy dở sẽ dừng, bài đã crawl vẫn nằm trong hàng chờ.
 - Lịch cron tính theo giờ máy tính; Chrome có thể trễ tối đa ~30 giây và không chạy khi máy ngủ.
-- Bộ bóc dữ liệu viết cho bài thường; bài liveblog, blog (`blogs.timesofisrael.com`) có cấu trúc khác, regex mặc định không lấy.
+- TOI: bộ bóc dữ liệu viết cho bài thường; bài liveblog, blog (`blogs.timesofisrael.com`) có cấu trúc khác, regex mặc định không lấy.

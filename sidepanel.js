@@ -1,5 +1,6 @@
 import { nextRuns } from './lib/cron.js';
 import { DEFAULTS, GLOBAL_DEFAULTS, gatewayOriginPattern } from './lib/config.js';
+import { SITES, getSite } from './lib/sites.js';
 
 const $ = id => document.getElementById(id);
 const send = msg => chrome.runtime.sendMessage(msg);
@@ -7,9 +8,36 @@ const fmt = ts => (ts ? new Date(ts).toLocaleString('vi-VN', { hour12: false }) 
 
 let tabId = null;
 let formFilled = false;
+let currentSite = null; // site đang chọn trên form
+
+// Danh sách site cho ô chọn
+function fillSiteOptions() {
+  const sel = $('site');
+  sel.innerHTML = '';
+  for (const [id, s] of Object.entries(SITES)) {
+    const o = document.createElement('option');
+    o.value = id;
+    o.textContent = s.name;
+    sel.appendChild(o);
+  }
+}
+
+// Đổi site: link home / regex còn là mặc định của site cũ (hoặc trống) thì đổi sang mặc định của site mới
+function applySite(id) {
+  const prev = getSite(currentSite);
+  const next = getSite(id);
+  if (!next) return;
+  if (!$('home').value.trim() || $('home').value.trim() === prev?.home) $('home').value = next.home;
+  if (!$('regex').value.trim() || $('regex').value.trim() === prev?.regex) $('regex').value = next.regex;
+  $('home').placeholder = next.home;
+  $('cates').placeholder = next.catePlaceholder || next.home;
+  currentSite = id;
+  updateHints();
+}
 
 function readForm() {
   return {
+    site: $('site').value,
     home: $('home').value,
     cates: $('cates').value,
     cron: $('cron').value,
@@ -45,6 +73,11 @@ async function requestGatewayPermission() {
 
 function fillForm(cfg) {
   const c = { ...DEFAULTS, ...(cfg || {}) };
+  if (!getSite(c.site)) c.site = DEFAULTS.site;
+  $('site').value = c.site;
+  currentSite = c.site;
+  $('home').placeholder = getSite(c.site).home;
+  $('cates').placeholder = getSite(c.site).catePlaceholder || getSite(c.site).home;
   $('home').value = c.home;
   $('cates').value = (c.cates || []).join('\n');
   $('cron').value = c.cron;
@@ -146,7 +179,7 @@ function renderBfProgress(list) {
     state.textContent = p.done
       ? `Xong · ${p.pages} trang`
       : p.pages
-        ? `${p.pages} trang · tới ${p.beforeDate ? new Date(p.beforeDate).toLocaleDateString('vi-VN') : '?'}`
+        ? `${p.pages} trang${p.label ? ` · tới ${p.label}` : ''}`
         : 'Chưa bắt đầu';
     li.append(cate, state);
     ul.appendChild(li);
@@ -156,7 +189,7 @@ function renderBfProgress(list) {
 function showTest(r) {
   $('testBox').hidden = false;
   $('testSummary').textContent =
-    `Nguồn: ${r.source}\nTìm thấy ${r.total} link bài (trang cate + tối đa 1 lượt Load more), ` +
+    `Nguồn: ${r.source}\nTìm thấy ${r.total} link bài (trang cate + tối đa 1 trang kế tiếp), ` +
     `${r.alreadySeen} link đã có trong cache.`;
   $('testSummary').style.whiteSpace = 'pre-wrap';
   const ol = $('testLinks');
@@ -208,6 +241,7 @@ async function updateTabInfo() {
 }
 
 async function init() {
+  fillSiteOptions();
   tabId = await resolveTabId();
   await updateTabInfo();
   chrome.tabs.onUpdated.addListener((id, info) => { if (id === tabId && info.url) updateTabInfo(); });
@@ -219,6 +253,7 @@ async function init() {
   }
 
   ['cron', 'regex'].forEach(id => $(id).addEventListener('input', updateHints));
+  $('site').addEventListener('change', () => applySite($('site').value));
 
   $('btnShowKey').addEventListener('click', () => {
     const input = $('apiKey');

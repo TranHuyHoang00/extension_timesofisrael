@@ -7,6 +7,7 @@ import {
   GLOBAL_DEFAULTS,
 } from "./lib/config.js";
 import * as store from "./lib/cache.js";
+import { getSite } from "./lib/sites.js";
 
 // ---------- Hằng số ----------
 // chrome.storage.local: cấu hình/trạng thái/log gắn theo tab id, cấu hình gateway dùng chung.
@@ -33,8 +34,8 @@ const RESUME_DELAY_MS = 5000; // trang tải lại xong, chờ 5 giây rồi m�
 //   bf:<tabId>   = tab đang ở chế độ "Lấy toàn bộ"
 //   rs:<tabId>   = { mode, reloads, pending } — đang chờ tự chạy tiếp sau khi F5
 //   beat:<tabId> = lần cuối tab báo "còn sống"
-// chrome.storage.local "bfpos" = { [linkCate]: { params, pages, done } } — dấu trang của chế độ Lấy toàn bộ,
-//   lưu theo link cate nên đóng tab / tắt Chrome vẫn còn.
+// chrome.storage.local "bfpos" = { [linkCate]: { cursor, label, pages, done } } — dấu trang của chế độ Lấy toàn bộ,
+//   lưu theo link cate nên đóng tab / tắt Chrome vẫn còn. cursor do sites/<site>.js tạo (bản cũ tên là params).
 const S = {
   bf: (id) => `bf:${id}`,
   rs: (id) => `rs:${id}`,
@@ -251,10 +252,13 @@ async function ensureOnSite(tabId, home) {
   await waitComplete(tabId);
 }
 
-async function inject(tabId) {
+// Tiêm phần chung + phần riêng của site vào tab
+async function inject(tabId, cfg) {
+  const site = getSite(cfg.site);
+  if (!site) throw new Error(`Không có site "${cfg.site}" trong lib/sites.js`);
   await chrome.scripting.executeScript({
     target: { tabId },
-    files: ["lib/toi.js", "content.js"],
+    files: ["lib/site-utils.js", site.script, "content.js"],
   });
 }
 
@@ -567,7 +571,7 @@ async function launch(tabId, cfg, mode, reason, buildMessage) {
     }
 
     await ensureOnSite(tabId, cfg.home);
-    await inject(tabId);
+    await inject(tabId, cfg);
     const runId = `${tabId}-${Date.now()}`;
     await patchStatus(tabId, {
       running: true,
@@ -611,7 +615,7 @@ async function startRun(tabId, reason) {
   if (await stillRunning(tabId, reason))
     return { ok: false, error: "Lượt trước chưa xong" };
   return launch(tabId, cfg, "schedule", reason, (runId) => ({
-    type: "TOI_RUN",
+    type: "CR_RUN",
     runId,
     config: cfg,
   }));
@@ -627,7 +631,7 @@ async function startBackfill(tabId, reason) {
   if (await stillRunning(tabId, reason))
     return { ok: false, error: "Lượt trước chưa xong" };
   return launch(tabId, cfg, "backfill", reason, async (runId) => ({
-    type: "TOI_BACKFILL",
+    type: "CR_BACKFILL",
     runId,
     config: cfg,
     positions: await get(BF_POS_KEY, {}),
@@ -645,7 +649,12 @@ async function backfillProgress(cfg) {
       cate,
       pages: p.pages || 0,
       done: !!p.done,
-      beforeDate: p.params?.before_date ? Number(p.params.before_date) * 1000 : null,
+      // Đã lùi tới đâu (chữ do site tạo). Dấu trang lưu từ bản cũ chỉ có params.before_date (giây)
+      label:
+        p.label ??
+        (p.params?.before_date
+          ? new Date(Number(p.params.before_date) * 1000).toLocaleDateString("vi-VN")
+          : ""),
     };
   });
 }
@@ -656,13 +665,13 @@ async function handle(msg, sender) {
 
   switch (msg.type) {
     // --- từ content script ---
-    case "TOI_LOG":
+    case "CR_LOG":
       await log(tabIdFromSender, msg.text);
       await touch(tabIdFromSender);
       return { ok: true };
 
     // Nhịp tim lúc content script đang chờ (delay dài, chờ thử lại khi bị chặn)
-    case "TOI_BEAT":
+    case "CR_BEAT":
       await touch(tabIdFromSender);
       return { ok: true };
 
@@ -706,7 +715,7 @@ async function handle(msg, sender) {
       await store.release(msg.url, msg.owner);
       return { ok: true };
 
-    case "TOI_RECORD": {
+    case "CR_RECORD": {
       const tabId = tabIdFromSender;
       const st = await get(K.st(tabId), {});
       if (st.runId !== msg.runId) {
@@ -762,7 +771,7 @@ async function handle(msg, sender) {
       return { ok: true, queued: true };
     }
 
-    case "TOI_DONE": {
+    case "CR_DONE": {
       const tabId = tabIdFromSender;
       // Lượt cũ kết thúc sau khi đã có lượt mới → không đụng vào trạng thái của lượt mới
       const cur = await get(K.st(tabId), {});
@@ -864,7 +873,7 @@ async function handle(msg, sender) {
       await schedule(tabId);
       await sdel(S.rs(tabId)); // không tự chạy tiếp sau khi tắt lịch
       await chrome.tabs
-        .sendMessage(tabId, { type: "TOI_ABORT" })
+        .sendMessage(tabId, { type: "CR_ABORT" })
         .catch(() => {});
       await log(tabId, "Đã tắt lịch");
       return { ok: true };
@@ -878,9 +887,9 @@ async function handle(msg, sender) {
       const { cfg, errors } = normalizeConfig(raw, { requireKafka: false });
       if (errors.length) return { ok: false, errors };
       await ensureOnSite(tabId, cfg.home);
-      await inject(tabId);
+      await inject(tabId, cfg);
       await log(tabId, "Chạy test crawl (không gửi Kafka, không ghi cache)");
-      return chrome.tabs.sendMessage(tabId, { type: "TOI_TEST", config: cfg });
+      return chrome.tabs.sendMessage(tabId, { type: "CR_TEST", config: cfg });
     }
 
     // Gửi thử 1 message nhỏ để kiểm tra URL, API key, topic
@@ -892,7 +901,7 @@ async function handle(msg, sender) {
       if (errors.length) return { ok: false, errors };
       const r = await sendBatch(
         t.cfg.topic,
-        [{ type: "test", source: "toi-crawler", ts: Date.now() }],
+        [{ type: "test", source: "crawler", ts: Date.now() }],
         b.global,
       ).catch((e) => ({ ok: false, error: e.message }));
       await log(
@@ -939,7 +948,7 @@ async function handle(msg, sender) {
     case "BF_STOP": {
       const { tabId } = msg;
       await sdel([S.bf(tabId), S.rs(tabId)]);
-      await chrome.tabs.sendMessage(tabId, { type: "TOI_ABORT" }).catch(() => {});
+      await chrome.tabs.sendMessage(tabId, { type: "CR_ABORT" }).catch(() => {});
       await log(tabId, "Dừng Lấy toàn bộ (vị trí đã lưu, bấm lại để chạy tiếp)");
       return { ok: true };
     }
