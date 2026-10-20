@@ -6,7 +6,6 @@ Phần chung (lịch, Lấy toàn bộ, cache, Kafka, tự F5 khi bị chặn) d
 
 1. Mở `chrome://extensions`, bật **Developer mode**.
 2. Bấm **Load unpacked**, chọn thư mục `extension_timesofisrael`.
-3. Cập nhật từ bản cũ: chép đè file rồi bấm **Reload** (mũi tên tròn) ở extension. Bản 0.2.0 đã bỏ phần lưu file, có thể xoá `offscreen.html` và `offscreen.js` nếu còn.
 
 ## Dùng
 
@@ -19,14 +18,13 @@ Phần chung (lịch, Lấy toàn bộ, cache, Kafka, tự F5 khi bị chặn) d
    - **Regex**: lọc link bài. Để trống thì dùng regex mặc định của site (TOI: link dạng `https://www.timesofisrael.com/<slug-dai-nhieu-tu>/`).
    - **Delay ngẫu nhiên**: chờ ngẫu nhiên trong khoảng này trước mỗi request tới site.
    - **Số trang quét mỗi Cate**: ngoài trang cate, quét thêm bao nhiêu trang kế tiếp (TOI: mỗi trang = một lần bấm Load more; 0 = chỉ trang cate).
-   - **HTML gửi đi**: toàn trang, hoặc chỉ khối `#main-content` (nhẹ hơn khoảng 10–20%).
+   - **HTML gửi đi**: chỉ khối `#main-content` của bài viết
    - **Giữ cache (ngày)**: link đã gửi được nhớ bao lâu để không gửi lại (mặc định 30).
    - **Kafka**:
      - **Gateway URL**, **API key**: dùng chung cho mọi tab, nhập một lần.
      - **Topic**, **Batch size** (1–100, mặc định 10): riêng từng tab.
 3. Bấm **Test crawl**: xem số link tìm được, bài nào đã gửi, và một bài mẫu đã bóc. Không gửi Kafka, không ghi cache.
-4. Bấm **Test gateway**: gửi một message `{"type":"test","source":"toi-crawler","ts":...}` vào topic để kiểm tra URL, API key, topic. Phía consumer nên bỏ qua message có `type = "test"`.
-5. Bấm **Lưu & bật lịch**. Lần đầu Chrome sẽ hỏi cấp quyền truy cập domain gateway, chọn **Allow**. Muốn chạy ngay thì bấm **Chạy ngay**.
+4. Bấm **Lưu & bật lịch**. Lần đầu Chrome sẽ hỏi cấp quyền truy cập domain gateway, chọn **Allow**. Muốn chạy ngay thì bấm **Chạy ngay**.
 
 ## Luồng chạy
 
@@ -40,7 +38,7 @@ Mọi request tới site chạy bằng `fetch` từ trong tab của site nên ma
 
 ## Lấy toàn bộ bài cũ
 
-Khu **Lấy toàn bộ bài cũ** trong side panel: đi từ trang đầu tới **trang cuối** của từng cate (không giới hạn số trang), xong cate này sang cate kia.
+**Lấy toàn bộ bài cũ** trong side panel: đi từ trang đầu tới **trang cuối** của từng cate (không giới hạn số trang), xong cate này sang cate kia.
 
 - **Mỗi tab một chế độ**: tab đang bật lịch thì khoá Lấy toàn bộ (tắt lịch trước), tab đang Lấy toàn bộ thì khoá lịch, Chạy ngay, Test crawl.
 - **Dấu trang**: xong trọn một trang thì lưu **con trỏ** của trang kế tiếp cho cate đó. Lưu theo **link cate** trong `chrome.storage.local` (khoá `bfpos`), nên đóng tab / tắt Chrome vẫn còn. Với TOI, con trỏ là tham số Load more (gồm mốc thời gian `before_date`), nên site đăng thêm bài mới trong lúc lấy cũng không làm lệch vị trí.
@@ -105,32 +103,31 @@ Mỗi phần tử trong `message`:
 
 ```json
 {
-  "site": "timesofisrael",
+  "domain":"https://www.timesofisrael.com",
+  // "site": "timesofisrael",
   "url": "https://www.timesofisrael.com/...",
-  "post_id": "3914542",
-  "title": "...",
-  "sapo": "...",
-  "authors": [
-    {
-      "name": "Andrew Lapin",
-      "url": "https://www.timesofisrael.com/writers/andrew-lapin/"
-    }
-  ],
-  "published_text": "14 October 2026, 7:45 pm",
-  "published_at": "2026-10-14T16:45:00.000Z",
-  "topics": [{ "name": "Jewish Times", "url": "..." }],
-  "image": "https://static-cdn.toi-media.com/...",
-  "content_text": "Đoạn 1\n\nĐoạn 2 ...",
-  "category_url": "https://www.timesofisrael.com/jewish-times/",
-  "crawled_at": "2026-10-15T03:39:34.000Z",
-  "ts": 1792044574000,
-  "html_mode": "full",
-  "html_length": 117115,
+  // "post_id": "3914542",
+  // "title": "...",
+  // "sapo": "...",
+  // "authors": [
+  //   {
+  //     "name": "Andrew Lapin",
+  //     "url": "https://www.timesofisrael.com/writers/andrew-lapin/"
+  //   }
+  // ],
+  // "published_text": "14 October 2026, 7:45 pm",
+  // "published_at": "2026-10-14T16:45:00.000Z",
+  // "topics": [{ "name": "Jewish Times", "url": "..." }],
+  // "image": "https://static-cdn.toi-media.com/...",
+  // "content_text": "Đoạn 1\n\nĐoạn 2 ...",
+  // "category_url": "https://www.timesofisrael.com/jewish-times/",
+  // "crawled_at": "2026-10-15T03:39:34.000Z",
+  // "ts": 1792044574000,
+  // "html_mode": "full",
+  // "html_length": 117115,
   "html": "<!doctype html>..."
 }
 ```
-
-`published_at` quy đổi với giả định giờ hiển thị trên site là giờ Israel.
 
 ## Chống trùng
 
