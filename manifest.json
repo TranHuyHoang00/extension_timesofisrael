@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "TimesOfIsrael",
+  "name": "News Crawler",
   "version": "1.0.2",
   "description": "Crawl data",
   "permissions": [
@@ -15,7 +15,8 @@
   ],
   "host_permissions": [
     "https://www.timesofisrael.com/*",
-    "https://services-delivery-dev.intelsys.group/*"
+    "https://services-delivery-dev.intelsys.group/*",
+    "https://dkpservices.intelsys.group/*"
   ],
   "optional_host_permissions": ["https://*/*", "http://*/*"],
   "background": {
@@ -23,7 +24,7 @@
     "type": "module"
   },
   "action": {
-    "default_title": "TimesOfIsrael"
+    "default_title": "News Crawler"
   },
   "minimum_chrome_version": "116"
 }

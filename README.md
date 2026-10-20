@@ -5,7 +5,7 @@ Phần chung (lịch, Lấy toàn bộ, cache, Kafka, tự F5 khi bị chặn) d
 ## Cài đặt
 
 1. Mở `chrome://extensions`, bật **Developer mode**.
-2. Bấm **Load unpacked**, chọn thư mục `extension_timesofisrael`.
+2. Bấm **Load unpacked**, chọn thư mục
 
 ## Dùng
 
