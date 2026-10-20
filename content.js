@@ -170,7 +170,7 @@
         source: src,
         htmlMode: cfg.htmlMode,
       });
-      record.ts = Date.now();
+      // record.ts = Date.now(); // thời điểm crawl (ms), mở ra nếu cần
       r = await send({ type: "CR_RECORD", runId, record });
     } catch (e) {
       await send({ type: "RELEASE", url, owner: runId }).catch(() => {});
@@ -371,15 +371,11 @@
         source: src,
         htmlMode: cfg.htmlMode,
       });
-      rec.ts = Date.now();
-      result.sample = {
-        ...rec,
-        content_text: rec.content_text
-          ? rec.content_text.slice(0, 400) +
-            (rec.content_text.length > 400 ? "…" : "")
-          : null,
-        html: rec.html.slice(0, 300) + "…",
-      };
+      // rec.ts = Date.now();
+      result.sample = { ...rec, html: rec.html.slice(0, 300) + "…" };
+      if (rec.content_text)
+        result.sample.content_text =
+          rec.content_text.slice(0, 400) + (rec.content_text.length > 400 ? "…" : "");
     }
     return result;
   }

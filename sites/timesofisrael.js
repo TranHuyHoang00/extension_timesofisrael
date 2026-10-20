@@ -65,56 +65,59 @@
     return U.zonedToIso(Number(year), month, Number(day), hour, Number(mm), SITE_TZ);
   }
 
+  // Hiện chỉ gửi 3 trường: domain, url, html.
+  // Các trường khác để sẵn trong comment, cần dùng thì mở comment ra (cả phần bóc ở trên và dòng trong record).
   function parseArticle({ url, finalUrl, html, doc, source, htmlMode }) {
-    const q = (sel) => doc.querySelector(sel);
-    const main = q("#main-content") || doc;
-    const clean = U.clean;
+    // const q = (sel) => doc.querySelector(sel);
+    // const main = q("#main-content") || doc;
+    // const clean = U.clean;
 
-    const postId =
-      q("#openwebComments")?.dataset.postId ||
-      main.querySelector(".edit a[data-id]")?.dataset.id ||
-      null;
+    // const postId =
+    //   q("#openwebComments")?.dataset.postId ||
+    //   main.querySelector(".edit a[data-id]")?.dataset.id ||
+    //   null;
 
-    const authors = [...main.querySelectorAll("header .byline a")].map((a) => ({
-      name: clean(a),
-      url: U.normalizeUrl(a.getAttribute("href"), url),
-    }));
+    // const authors = [...main.querySelectorAll("header .byline a")].map((a) => ({
+    //   name: clean(a),
+    //   url: U.normalizeUrl(a.getAttribute("href"), url),
+    // }));
 
-    const dateText = clean(main.querySelector(".under-headline .date"));
+    // const dateText = clean(main.querySelector(".under-headline .date"));
 
-    const topics = [...doc.querySelectorAll(".article-topics a")].map((a) => ({
-      name: clean(a),
-      url: U.normalizeUrl(a.getAttribute("href"), url),
-    }));
+    // const topics = [...doc.querySelectorAll(".article-topics a")].map((a) => ({
+    //   name: clean(a),
+    //   url: U.normalizeUrl(a.getAttribute("href"), url),
+    // }));
 
-    const body = main.querySelector(".the-content");
-    const paragraphs = body
-      ? [...body.querySelectorAll(":scope > p")].map(clean).filter(Boolean)
-      : [];
+    // const body = main.querySelector(".the-content");
+    // const paragraphs = body
+    //   ? [...body.querySelectorAll(":scope > p")].map(clean).filter(Boolean)
+    //   : [];
 
-    const image = main.querySelector(".wp-post-image")?.getAttribute("src") || null;
+    // const image = main.querySelector(".wp-post-image")?.getAttribute("src") || null;
 
     const outHtml = U.prepareHtml(html, doc, htmlMode, "#main-content");
 
     const record = {
-      site: "timesofisrael",
+      domain: new URL(url).hostname, // ví dụ "www.timesofisrael.com"
+      // site: "timesofisrael",
       url,
-      post_id: postId,
-      title: clean(main.querySelector("h1.headline")),
-      sapo: clean(main.querySelector("h2.underline")),
-      authors,
-      published_text: dateText,
-      published_at: parseDate(dateText),
-      topics,
-      image,
-      content_text: paragraphs.join("\n\n") || null,
-      category_url: source,
-      crawled_at: new Date().toISOString(),
-      html_mode: htmlMode,
-      html_length: outHtml.length,
+      // post_id: postId,
+      // title: clean(main.querySelector("h1.headline")),
+      // sapo: clean(main.querySelector("h2.underline")),
+      // authors,
+      // published_text: dateText,
+      // published_at: parseDate(dateText),
+      // topics,
+      // image,
+      // content_text: paragraphs.join("\n\n") || null,
+      // category_url: source,
+      // crawled_at: new Date().toISOString(),
+      // html_mode: htmlMode,
+      // html_length: outHtml.length,
       html: outHtml,
     };
-    if (finalUrl && finalUrl !== url) record.final_url = finalUrl;
+    // if (finalUrl && finalUrl !== url) record.final_url = finalUrl;
     return record;
   }
 
